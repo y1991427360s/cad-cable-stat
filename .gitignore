@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.spec
+
+# Build & Review temporary directories
+_build*/
+_review*/
+ErrorReports/
+
+# Large Binaries / Dist executables
+*.exe
+*.zip
+*.tar.gz
+
+# Backup files
+*.bak*
+
+# Office / Temporary Excel lock files
+~$*.xlsx
+~$*.xls
+
+# CAD Temporary files
+*.dwl
+*.dwl2
+*.bak
+
+# VS Code / IDE
+.vscode/
+.idea/
