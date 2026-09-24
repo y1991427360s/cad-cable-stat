@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import sys
 import traceback
 from pathlib import Path
@@ -8,15 +7,11 @@ from pathlib import Path
 import openpyxl
 
 import calculate_cable_lengths
+from calculate_cable_lengths import normalize_header
 
 
-# 「自动统计」列可以没有，核心脚本会自动在表尾补建
-REQUIRED_HEADERS = {"起点", "终点", "电缆长度"}
-
-
-def normalize_header(value) -> str:
-    """表头匹配剔除全部空白（含单元格内换行），兼容「电缆↵长度」这类写法。"""
-    return re.sub(r"[\s 　]+", "", str(value))
+# 与 load_workbook_rows 的必需表头一致；「自动统计」「向上取整」列可以没有，核心脚本会自动补建
+REQUIRED_HEADERS = {"电缆编号", "起点", "终点", "电缆长度"}
 
 
 def has_required_headers(path: Path) -> bool:
@@ -36,7 +31,7 @@ def find_workbook(project_dir: Path) -> Path:
     candidates = [path for path in project_dir.glob("*.xlsx") if has_required_headers(path)]
     if not candidates:
         raise FileNotFoundError(
-            f"没有找到表头包含“起点、终点、电缆长度”的 xlsx 文件（表头空格/换行会自动忽略，“自动统计”列可以没有）。\n"
+            f"没有找到表头包含“电缆编号、起点、终点、电缆长度”的 xlsx 文件（表头空格/换行会自动忽略，“自动统计”列可以没有）。\n"
             f"请把原清册（建议命名为“自动统计.xlsx”）放到项目文件夹：{project_dir}"
         )
     exact = [path for path in candidates if path.stem == "自动统计"]
@@ -77,7 +72,6 @@ def main() -> int:
                 str(data_dir),
                 "--output",
                 str(output),
-                "--make-cabinet-checklist",
             ]
         )
     except Exception as exc:

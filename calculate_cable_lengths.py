@@ -7,7 +7,6 @@ import heapq
 import json
 import math
 import re
-import shutil
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -451,6 +450,32 @@ def validate_room_assignments(cabinets: dict[str, Cabinet], rooms: list[Room]) -
     return warnings
 
 
+def check_suspicious_rooms(rooms: list[Room], cabinets: dict[str, Cabinet], segments: list[Segment]) -> list[str]:
+    """房间里既没有柜子、也没有路径经过，多半是误放在房间图层上的图框/表格。"""
+    warnings: list[str] = []
+    unique_cabinets = list({id(cab): cab for cab in cabinets.values()}.values())
+    for room in rooms:
+        where = f"{room.floor} {room.name}" + (f"（句柄 {room.handle}）" if room.handle else "")
+        if room.name.startswith("房间_"):
+            warnings.append(f"房间范围 {where} 没有名称（名字是CAD句柄自动编的），可能不是用向导“定义房间”建的，请在CAD里用 DDFD_ROOM_CHECK 核对")
+        xs = [x for x, _ in room.vertices]
+        ys = [y for _, y in room.vertices]
+        x0, x1, y0, y1 = min(xs), max(xs), min(ys), max(ys)
+        has_cabinet = any(
+            cab.floor == room.floor and point_in_polygon((cab.x, cab.y), room.vertices) for cab in unique_cabinets
+        )
+        has_route = any(
+            seg.floor == room.floor
+            and max(seg.ax, seg.bx) >= x0 and min(seg.ax, seg.bx) <= x1
+            and max(seg.ay, seg.by) >= y0 and min(seg.ay, seg.by) <= y1
+            and segment_room_relation((seg.ax, seg.ay), (seg.bx, seg.by), room)[0]
+            for seg in segments
+        )
+        if not has_cabinet and not has_route:
+            warnings.append(f"房间范围 {where} 里既没有柜子也没有路径经过，可能误选了图框/表格，请在CAD里用 DDFD_ROOM_CHECK 核对")
+    return warnings
+
+
 def load_aliases(data_dir: Path) -> tuple[dict[str, str], list[str]]:
     """读取柜名别名表：清册名称 -> CAD名称。文件不存在时返回空映射。"""
     aliases: dict[str, str] = {}
@@ -520,6 +545,12 @@ def load_workbook_rows(workbook_path: Path) -> tuple[Any, Any, dict[str, int], l
     missing = [h for h in required if h not in headers]
     if missing:
         raise ValueError(f"清册缺少表头：{', '.join(missing)}")
+    # 手工长度是公式时读 Excel 上次保存的计算结果；列号取插列之前的原始位置
+    manual_col = headers["电缆长度"]
+    try:
+        values_ws = openpyxl.load_workbook(workbook_path, data_only=True)[ws.title]
+    except Exception:
+        values_ws = None
     if "自动统计" not in headers:
         auto_col = max(headers.values()) + 1
         ws.cell(1, auto_col).value = "自动统计"
@@ -543,13 +574,16 @@ def load_workbook_rows(workbook_path: Path) -> tuple[Any, Any, dict[str, int], l
             names.add(start)
         if end:
             names.add(end)
+        manual = ws.cell(row_no, headers["电缆长度"]).value
+        if isinstance(manual, str) and manual.startswith("=") and values_ws is not None:
+            manual = values_ws.cell(row_no, manual_col).value
         rows.append(
             {
                 "row_no": row_no,
                 "电缆编号": normalize_text(ws.cell(row_no, headers["电缆编号"]).value),
                 "起点": start,
                 "终点": end,
-                "手工长度": ws.cell(row_no, headers["电缆长度"]).value,
+                "手工长度": manual,
             }
         )
     return wb, ws, headers, rows, sorted(names)
@@ -1046,14 +1080,15 @@ def visual_node(graph: RouteGraph, node_id: str) -> dict[str, Any]:
 
 
 def visual_edge(graph: RouteGraph, meta: dict[str, Any]) -> dict[str, Any]:
-    from_node = visual_node(graph, meta["from"])
-    to_node = visual_node(graph, meta["to"])
+    """路径边只引用节点编号（节点详情在顶层 nodes 里），可视化页面加载时再换回节点对象。"""
+    from_floor = graph.nodes[meta["from"]].get("floor", "")
+    to_floor = graph.nodes[meta["to"]].get("floor", "")
     edge = {
         "kind": meta.get("kind", ""),
-        "from": from_node,
-        "to": to_node,
+        "from": meta["from"],
+        "to": meta["to"],
         "length_m": rounded_number(meta.get("length_m")),
-        "floor": from_node["floor"] if from_node["floor"] == to_node["floor"] else "跨楼层",
+        "floor": from_floor if from_floor == to_floor else "跨楼层",
     }
     for key in ("route_id", "section_no", "layer", "segment_idx", "shaft_id", "name", "attach_kind"):
         if key in meta:
@@ -1153,7 +1188,7 @@ def calculate_rows(
         start_room = ""
         end_room = ""
         crosses_room = False
-        path_nodes: list[dict[str, Any]] = []
+        path_nodes: list[str] = []
         path_edges: list[dict[str, Any]] = []
         try:
             if graph is None:
@@ -1199,7 +1234,7 @@ def calculate_rows(
             if isinstance(manual, (int, float)):
                 diff = round(auto_value - manual, 1)
             desc = path_description(edge_metas)
-            path_nodes = [visual_node(graph, node_id) for node_id in path_node_ids]
+            path_nodes = list(path_node_ids)
             path_edges = [visual_edge(graph, meta) for meta in edge_metas]
         except Exception as exc:
             status = str(exc)
@@ -1296,7 +1331,8 @@ def write_results_to_workbook(
     params: dict[str, float],
     cabinet_check_rows: list[dict[str, Any]],
     issues: list[str],
-) -> None:
+) -> Path:
+    """写结果工作簿，返回实际保存路径；结果文件正被 Excel 打开时改存带时间的新文件名。"""
     auto_col = headers["自动统计"]
     ceil_col = headers["向上取整"]
     for detail in detail_rows:
@@ -1324,7 +1360,14 @@ def write_results_to_workbook(
     )
     fit_columns(ws)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(output_path)
+    try:
+        wb.save(output_path)
+        return output_path
+    except PermissionError:
+        fallback = output_path.with_name(f"{output_path.stem}_{datetime.now():%H%M%S}{output_path.suffix}")
+        wb.save(fallback)
+        print(f"注意：{output_path.name} 正被占用（多半在 Excel 里开着），本次结果另存为 {fallback.name}")
+        return fallback
 
 
 def make_cabinet_check_rows(rows: list[dict[str, Any]], cabinets: dict[str, Cabinet]) -> list[dict[str, Any]]:
@@ -1631,6 +1674,15 @@ VISUALIZER_HTML_TEMPLATE = """<!doctype html>
   <script>
     const data = JSON.parse(document.getElementById("visual-data").textContent);
     data.rooms = data.rooms || [];
+    // 路径边只存节点编号以缩小文件，这里换回节点对象（只读共享）
+    const nodeById = new Map((data.nodes || []).map(node => [node.id, node]));
+    data.cables.forEach(cable => {
+      cable.path_edges = cable.path_edges || [];
+      cable.path_edges.forEach(edge => {
+        if (typeof edge.from === "string") edge.from = nodeById.get(edge.from) || { id: edge.from };
+        if (typeof edge.to === "string") edge.to = nodeById.get(edge.to) || { id: edge.to };
+      });
+    });
     const state = {
       selected: Math.max(0, data.cables.findIndex(c => c.status === "OK")),
       floor: "ALL",
@@ -2730,7 +2782,7 @@ def build_visualization_data(
     ok_count = sum(1 for cable in visual_cables if cable["status"] == "OK")
     failed_count = len(visual_cables) - ok_count
     return {
-        "version": 2,
+        "version": 3,
         "title": "电缆路径可视化",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "source_workbook": str(workbook_path),
@@ -2762,9 +2814,9 @@ def write_visualization_files(outputs_dir: Path, visual_data: dict[str, Any]) ->
     outputs_dir.mkdir(parents=True, exist_ok=True)
     data_path = outputs_dir / "路径可视化数据.json"
     html_path = outputs_dir / "路径可视化.html"
-    data_json = json.dumps(visual_data, ensure_ascii=False, indent=2)
-    data_path.write_text(data_json, encoding="utf-8")
-    html = VISUALIZER_HTML_TEMPLATE.replace("__VISUAL_DATA_JSON__", data_json.replace("</", "<\\/"))
+    data_path.write_text(json.dumps(visual_data, ensure_ascii=False, indent=1), encoding="utf-8")
+    compact = json.dumps(visual_data, ensure_ascii=False, separators=(",", ":"))
+    html = VISUALIZER_HTML_TEMPLATE.replace("__VISUAL_DATA_JSON__", compact.replace("</", "<\\/"))
     html_path.write_text(html, encoding="utf-8")
     return data_path, html_path
 
@@ -2774,7 +2826,6 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--workbook", required=True, type=Path, help="自动统计.xlsx 路径")
     parser.add_argument("--data-dir", required=True, type=Path, help="包含CSV数据的目录")
     parser.add_argument("--output", required=True, type=Path, help="输出xlsx路径")
-    parser.add_argument("--make-cabinet-checklist", action="store_true", help="额外输出柜子清单CSV")
     args = parser.parse_args(argv)
 
     params = load_params(args.data_dir)
@@ -2788,18 +2839,21 @@ def main(argv: list[str] | None = None) -> None:
     rooms, room_warnings = load_rooms(args.data_dir)
     graph, cabinet_nodes, graph_issues = build_graph(segments, cabinets, shafts, required_names, params)
     room_warnings += validate_room_assignments(cabinets, rooms)
+    room_warnings += check_suspicious_rooms(rooms, cabinets, segments)
     detail_rows, visual_cables = calculate_rows(rows, graph, cabinet_nodes, cabinets, params, rule_overrides, rooms)
     cabinet_check_rows = make_cabinet_check_rows(rows, cabinets)
     floor_offsets, offset_warnings = compute_floor_offsets(collect_floors(segments, cabinets, shafts), shafts)
 
     issues = cabinet_warnings + alias_warnings + override_warnings + room_warnings + graph_issues + offset_warnings
+    if not (args.data_dir / "参数.csv").exists():
+        issues.insert(0, "参数提示：data 里没有 参数.csv，本次全部用内置默认值；需要改参数时从项目模板复制一份")
     failed_count = sum(1 for r in detail_rows if r["状态"] != "OK")
     if failed_count:
         issues.insert(0, f"共有 {failed_count} 条电缆未能计算，详见“统计明细”状态列")
     ok_count = len(detail_rows) - failed_count
     issues.insert(0, f"已计算 {ok_count} 条，未计算 {failed_count} 条")
 
-    write_results_to_workbook(
+    output_path = write_results_to_workbook(
         args.workbook,
         args.output,
         wb,
@@ -2812,15 +2866,17 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     outputs_dir = args.output.parent
-    write_csv_dicts(outputs_dir / "统计明细.csv", detail_rows, DETAIL_HEADERS)
-    write_csv_dicts(
-        outputs_dir / "柜子清单.csv",
-        cabinet_check_rows,
-        CABINET_CHECK_HEADERS,
-    )
+    for name, csv_rows, csv_headers in (
+        ("统计明细.csv", detail_rows, DETAIL_HEADERS),
+        ("柜子清单.csv", cabinet_check_rows, CABINET_CHECK_HEADERS),
+    ):
+        try:
+            write_csv_dicts(outputs_dir / name, csv_rows, csv_headers)
+        except PermissionError:
+            print(f"注意：{name} 正被占用（多半在 Excel 里开着），本次没有更新它；结果工作簿里有同样的表")
     visual_data = build_visualization_data(
         args.workbook,
-        args.output,
+        output_path,
         params,
         graph,
         segments,
@@ -2832,16 +2888,13 @@ def main(argv: list[str] | None = None) -> None:
         floor_offsets,
     )
     visual_json_path, visual_html_path = write_visualization_files(outputs_dir, visual_data)
-    if args.make_cabinet_checklist:
-        checklist_path = args.data_dir / "柜子清单.csv"
-        shutil.copyfile(outputs_dir / "柜子清单.csv", checklist_path)
 
-    print(f"已输出：{args.output}")
+    print(f"已输出：{output_path}")
     print(f"路径可视化页面：{visual_html_path}")
     print(f"路径可视化数据：{visual_json_path}")
     print(f"已计算 {ok_count} 条，未计算 {failed_count} 条")
     for issue in issues:
-        if issue.startswith("参数提示"):
+        if issue.startswith(("参数提示", "房间范围")):
             print(issue)
     if failed_count:
         print("请查看输出工作簿的“统计明细”和“问题清单”。")

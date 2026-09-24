@@ -547,6 +547,123 @@ def test_workbook_ceil_column_inserted_next_to_auto():
         assert rows[0]["起点"] == "A柜"
 
 
+def test_workbook_formula_manual_length_uses_cached_value():
+    """「电缆长度」是公式时取 Excel 上次保存的计算值，差值才能算出来。"""
+    import re
+    import tempfile
+    import zipfile
+
+    import openpyxl
+
+    from calculate_cable_lengths import load_workbook_rows
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["电缆编号", "起点", "终点", "电缆长度", "备注"])
+    ws.append(["1U-101", "A柜", "B柜", "=5+7.5", "x"])
+    with tempfile.TemporaryDirectory() as tmp:
+        raw = Path(tmp) / "raw.xlsx"
+        path = Path(tmp) / "自动统计.xlsx"
+        wb.save(raw)
+        # openpyxl 不算公式，这里模拟 Excel 保存后留下的缓存值
+        with zipfile.ZipFile(raw) as src, zipfile.ZipFile(path, "w") as dst:
+            for item in src.infolist():
+                data = src.read(item.filename)
+                if item.filename == "xl/worksheets/sheet1.xml":
+                    text = re.sub(r"<f>5\+7\.5</f>(<v\s*/>|<v></v>)?", "<f>5+7.5</f><v>12.5</v>", data.decode("utf-8"))
+                    data = text.encode("utf-8")
+                dst.writestr(item, data)
+        wb2, ws2, headers, rows, _ = load_workbook_rows(path)
+        assert rows[0]["手工长度"] == 12.5, rows
+        # 插入「向上取整」列后公式单元格本身保持不变
+        assert ws2.cell(2, headers["电缆长度"]).value == "=5+7.5"
+
+
+def test_find_workbook_requires_cable_no_header():
+    import tempfile
+
+    import openpyxl
+
+    from run_auto_stat import find_workbook
+
+    with tempfile.TemporaryDirectory() as tmp:
+        wb = openpyxl.Workbook()
+        wb.active.append(["起点", "终点", "电缆长度"])
+        wb.save(Path(tmp) / "缺编号.xlsx")
+        try:
+            find_workbook(Path(tmp))
+        except FileNotFoundError:
+            pass
+        else:
+            raise AssertionError("缺「电缆编号」列的表不应被当成清册")
+        wb = openpyxl.Workbook()
+        wb.active.append(["电缆编号", "起点", "终点", "电缆\n长度"])
+        wb.save(Path(tmp) / "清册.xlsx")
+        assert find_workbook(Path(tmp)).name == "清册.xlsx"
+
+
+def test_suspicious_rooms_reported():
+    """房间里既没柜子也没路径（误放在房间图层的图框/表格）、以及未命名房间都要提示。"""
+    from calculate_cable_lengths import check_suspicious_rooms
+
+    segments = [make_segment(1, 0, 0, 10000, 0)]
+    cabinets = {"柜A": make_cabinet("柜A", 1000, 500)}
+    rooms = [
+        make_room("配电室", [(0, 0), (2000, 0), (2000, 2000), (0, 2000)]),
+        make_room("走廊", [(4000, -500), (6000, -500), (6000, 500), (4000, 500)]),
+        make_room("图框", [(600000, 0), (607000, 0), (607000, 6000), (600000, 6000)]),
+        make_room("房间_1F130", [(4000, -500), (6000, -500), (6000, 500), (4000, 500)], floor="2F"),
+    ]
+    warnings = check_suspicious_rooms(rooms, cabinets, segments)
+    assert not any("配电室" in w or "走廊" in w for w in warnings), warnings
+    assert any("图框" in w and "既没有柜子也没有路径" in w for w in warnings), warnings
+    assert any("房间_1F130" in w and "没有名称" in w for w in warnings), warnings
+
+
+def test_locked_output_workbook_saved_under_new_name():
+    import tempfile
+
+    import openpyxl
+
+    from calculate_cable_lengths import write_results_to_workbook
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["电缆编号", "起点", "终点", "电缆长度", "自动统计", "向上取整"])
+    real_save = wb.save
+    attempts: list[Path] = []
+
+    def save(path):
+        attempts.append(Path(path))
+        if len(attempts) == 1:
+            raise PermissionError("locked")
+        real_save(path)
+
+    wb.save = save
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "outputs" / "自动统计_计算结果.xlsx"
+        saved = write_results_to_workbook(
+            target, target, wb, ws, {"自动统计": 5, "向上取整": 6}, [], dict(PARAMS), [], []
+        )
+        assert saved != target and saved.exists(), (saved, attempts)
+        assert saved.name.startswith("自动统计_计算结果_") and saved.suffix == ".xlsx"
+
+
+def test_visual_edges_reference_node_ids():
+    """可视化数据里路径边只存节点编号，且都能在顶层 nodes 里找到。"""
+    from calculate_cable_lengths import build_visualization_data
+
+    segments = [make_segment(1, 0, 0, 10000, 0), make_segment(2, 10000, 0, 10000, 5000)]
+    cabinets = {"柜A": make_cabinet("柜A", 1000, 100), "柜B": make_cabinet("柜B", 10100, 4000)}
+    graph, nodes, _ = build_graph(segments, cabinets, [], list(cabinets), PARAMS)
+    _, visuals = calculate_rows(make_rows([("柜A", "柜B")]), graph, nodes, cabinets, PARAMS)
+    data = build_visualization_data(Path("a.xlsx"), Path("b.xlsx"), PARAMS, graph, segments, cabinets, [], [], visuals, [])
+    node_ids = {node["id"] for node in data["nodes"]}
+    edges = data["cables"][0]["path_edges"]
+    assert edges and all(isinstance(e["from"], str) and e["from"] in node_ids and e["to"] in node_ids for e in edges)
+    assert all(isinstance(n, str) for n in data["cables"][0]["path_nodes"])
+
+
 def _run_all() -> int:
     failed = 0
     for name, fn in sorted(globals().items()):
@@ -554,9 +671,9 @@ def _run_all() -> int:
             try:
                 fn()
                 print(f"PASS {name}")
-            except AssertionError as exc:
+            except Exception as exc:
                 failed += 1
-                print(f"FAIL {name}: {exc}")
+                print(f"FAIL {name}: {type(exc).__name__}: {exc}")
     return failed
 
 

@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-本仓库是电缆长度自动统计工具，采用**工具/项目分离**结构：根目录只放通用工具代码，每个工程项目一个独立文件夹（默认在 `项目\<项目名>\`，含 `自动统计.xlsx`、`data\`、`outputs\` 和调用工具的 `一键启动.cmd`）；`项目模板\` 是新项目骨架。`calculate_cable_lengths.py` 负责计算，`run_auto_stat.py` 是项目入口，`cable_stat_app.py` 打包为 `电缆统计.exe`。用户侧只内嵌和导出完整向导 `cad_cable_wizard.lsp` 与项目模板；精简版 `cad_export_cable_route.lsp` 仅保留为开发兼容源码。改任何 py/lsp/模板后必须重新打包并用 `CABLE_STAT_SMOKETEST=1` 自检。两份 LISP 的导出逻辑必须同步，均按 GBK + CRLF 字节级读写；房间导出应遍历实体并读取 DXF 顶点/闭合位，不能依赖 ZWCAD 的曲线 COM 返回格式。
+本仓库是电缆长度自动统计工具，采用**工具/项目分离**结构：根目录只放通用工具代码，每个工程项目一个独立文件夹（默认在 `项目\<项目名>\`，含 `自动统计.xlsx`、`data\`、`outputs\` 和调用工具的 `一键启动.cmd`）；`项目模板\` 是新项目骨架。`calculate_cable_lengths.py` 负责计算，`run_auto_stat.py` 是项目入口，`cable_stat_app.py` 打包为 `电缆统计.exe`。用户侧只内嵌和导出完整向导 `cad_cable_wizard.lsp` 与项目模板；精简版 `cad_export_cable_route.lsp` 仅保留为开发兼容源码。改任何 py/lsp/模板后必须重新打包并用 `CABLE_STAT_SMOKETEST=1` 自检。两份 LISP 的导出逻辑必须同步，均按 GBK + CRLF 字节级读写；房间导出应遍历实体并读取 DXF 顶点/闭合位，不能依赖 ZWCAD 的曲线 COM 返回格式；只认带 `DDFD_CABLE_ROOM` XData 名称的多段线，定义房间不得改 CLAYER；改 LISP 同时更新 `*ddfd-cable-version*`。
 
 项目文件夹的 `data/` 存放 `参数.csv`、`柜子坐标.csv`、`路径线段.csv`、`竖井.csv`、可选的 `房间范围.csv`，以及人工维护的 `柜名别名.csv` 和 `强制规则.csv`。默认按毫米图配置：`CAD每米单位=1000`、`吸附容差=0.05`、`最大接入距离=20000`。项目文件夹的 `outputs/` 存放计算结果、统计明细、问题清单和路径可视化。`.dwg` 和 `.dwl` 是工程图基准文件，修改前确认是否属于当前工程基准。
 
@@ -21,7 +21,7 @@ python -m pip install openpyxl
 对指定项目文件夹运行完整统计流程，输出到该项目的 `outputs/`（等价于双击项目文件夹的 `一键启动.cmd`）。
 
 ```powershell
-python .\calculate_cable_lengths.py --workbook "<项目文件夹>\自动统计.xlsx" --data-dir "<项目文件夹>\data" --output "<项目文件夹>\outputs\自动统计_计算结果.xlsx" --make-cabinet-checklist
+python .\calculate_cable_lengths.py --workbook "<项目文件夹>\自动统计.xlsx" --data-dir "<项目文件夹>\data" --output "<项目文件夹>\outputs\自动统计_计算结果.xlsx"
 ```
 
 直接调试核心计算脚本，适合定位参数、路径或柜名问题。

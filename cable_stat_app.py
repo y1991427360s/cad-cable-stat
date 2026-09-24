@@ -140,7 +140,6 @@ def run_calculation(project_dir: Path, log) -> bool:
                     "--workbook", str(workbook),
                     "--data-dir", str(project_dir / "data"),
                     "--output", str(project_dir / "outputs" / "自动统计_计算结果.xlsx"),
-                    "--make-cabinet-checklist",
                 ]
             )
         return True

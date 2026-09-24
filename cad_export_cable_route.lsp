@@ -1,12 +1,16 @@
 ;;; 多氟多电缆长度自动统计 - CAD路径导出
-;;; 命令：DDFD_EXPORT_CABLE_ROUTE
+;;; 命令：DDFD_EXPORT_CABLE_ROUTE（导出4个CSV）| DDFD_ROOM_CHECK 检查房间 | DDFD_CLEAN_ROOM_LAYERS 清理房间图层
 ;;; 支持 AutoCAD / ZWCAD 常见的 LINE、LWPOLYLINE、POLYLINE、TEXT、MTEXT、INSERT、POINT。
 ;;; 建议图层：
 ;;;   CABLE_CABINET_1F / CABLE_CABINET_2F   柜子出线点或带柜名文字/块
 ;;;   CABLE_ROUTE_1F   / CABLE_ROUTE_2F     固定电缆沟/桥架中心线
 ;;;   CABLE_SHAFT_1F   / CABLE_SHAFT_2F     电缆竖井点或带竖井名文字/块
+;;;   CABLE_ROOM_1F    / CABLE_ROOM_2F      房间边界（需用向导的“定义房间”写入名称）
 
 (vl-load-com)
+
+;; 改动本文件时同步更新版本号，加载时会打印，便于确认 CAD 里用的是哪一版
+(setq *ddfd-cable-version* "2026-09-23")
 
 (defun ddfd-csv-escape (s / txt)
   (setq txt (if s (vl-princ-to-string s) ""))
@@ -208,28 +212,6 @@
        (or (= 1 (logand (cond ((cdr (assoc 70 ed))) (T 0)) 1))
            (equal (car pts) (last pts) 1e-6))))
 
-(defun ddfd-room-vertex-points (ename / ent typ cur pts item)
-  (setq ent (entget ename))
-  (setq typ (cdr (assoc 0 ent)))
-  (setq pts nil)
-  (if (= typ "LWPOLYLINE")
-    (foreach item ent
-      (if (= (car item) 10) (setq pts (append pts (list (cdr item)))))
-    )
-    (if (= typ "POLYLINE")
-      (progn
-        (setq cur (entnext ename))
-        (while (and cur (= (cdr (assoc 0 (entget cur))) "VERTEX"))
-          (setq item (cdr (assoc 10 (entget cur))))
-          (if item (setq pts (append pts (list item))))
-          (setq cur (entnext cur))
-        )
-      )
-    )
-  )
-  pts
-)
-
 (defun ddfd-export-one-room (fh en / ent layer floor name handle pts pt count)
   (setq ent (entget en) layer (cdr (assoc 8 ent)) floor (ddfd-layer-floor layer)
         name (ddfd-room-name en) handle (cdr (assoc 5 ent)))
@@ -245,38 +227,19 @@
           (list name floor (itoa count) (rtos (car pt) 2 6) (rtos (cadr pt) 2 6) layer handle)))
       count)))
 
-(defun ddfd-room-has-named-p (/ ss ent ed found)
-  (if (setq ss (ssget "_X" '((-3 ("DDFD_CABLE_ROOM")))))
-    (> (sslength ss) 0)
-    (progn
-      (setq ent (entnext) found nil)
-      (while (and ent (not found))
-        (setq ed (entget ent (list "DDFD_CABLE_ROOM")))
-        (if (and ed (assoc -3 ed)) (setq found T))
-        (setq ent (entnext ent)))
-      found)))
+;; 房间只认“定义房间”写过名称(XData)的多段线；图层上未命名的图形（图框、表格等）一律不当房间
+(defun ddfd-room-entity-p (ename / ent)
+  (setq ent (entget ename (list "DDFD_CABLE_ROOM")))
+  (and (member (cdr (assoc 0 ent)) '("LWPOLYLINE" "POLYLINE"))
+       (assoc -3 ent)))
 
-(defun ddfd-room-entity-p (ename / ent layer typ xd)
-  (setq ent (entget ename))
-  (setq layer (cdr (assoc 8 ent)))
-  (setq typ (cdr (assoc 0 ent)))
-  (setq xd (assoc -3 (entget ename (list "DDFD_CABLE_ROOM"))))
-  (and (member typ '("LWPOLYLINE" "POLYLINE"))
-       (or xd
-           (and layer (wcmatch (strcase layer) "CABLE_ROOM*")
-                (not (ddfd-room-has-named-p))))))
-
-;;; ==========================================================================
-;;; 模块: 房间导出范围管理 (ddfd-room-scope)
-;;; 包含: ddfd-room-exportable-p, ddfd-room-scope-load, 
-;;;       ddfd-room-scope-save, ddfd-room-scope-choose
-;;; ==========================================================================
-
-;; 辅助谓词: 校验实体是否为满足导出条件的有效闭合无弧房间
+;; 可导出的房间：模型空间、已命名、图层名能看出楼层、闭合、无圆弧、面积非零
 (defun ddfd-room-exportable-p (ent / ed pts area prev pt)
   (and ent (setq ed (entget ent))
     (/= (cdr (assoc 67 ed)) 1)
-    (ddfd-room-entity-p ent) (ddfd-room-closed-p ent)
+    (ddfd-room-entity-p ent)
+    (/= (ddfd-layer-floor (cdr (assoc 8 ed))) "")
+    (ddfd-room-closed-p ent)
     (not (ddfd-room-has-arc ent))
     (progn
       (setq pts (ddfd-room-vertices ent) area 0.0 prev (last pts))
@@ -284,64 +247,58 @@
         (setq area (+ area (- (* (car prev) (cadr pt)) (* (car pt) (cadr prev)))) prev pt))
       (> (abs area) 1e-9))))
 
-;; 加载持久化范围: 首行校验当前DWG全名，后续行校验图元句柄
-;; 全有效才返回实体图元名列表，出现任何失效句柄或非房间图元立即放弃并关闭文件
-(defun ddfd-room-scope-load (scopefile / fp curdwg line ent rooms valid)
-  (if (and scopefile
-           (= (type scopefile) 'STR)
-           (findfile scopefile)
-           (setq fp (open scopefile "r")))
-    (progn
-      (setq curdwg (strcat (getvar "DWGPREFIX") (getvar "DWGNAME"))
-            valid  T)
-      (setq line (read-line fp))
-      (if (and line (= (vl-string-right-trim "\r\n " line) curdwg))
-        (while (and valid (setq line (read-line fp)))
-          (setq line (vl-string-trim " \t\r\n" line))
-          (if (/= line "")
-            (if (and (setq ent (handent line))
-                     (ddfd-room-exportable-p ent))
-              (setq rooms (cons ent rooms))
-              (setq valid nil))))
-        (setq valid nil))
-      (close fp)
-      (if (and valid rooms)
-        (reverse rooms)
-        nil))
-    nil))
-
-;; 保存房间范围至持久化文本文件
-(defun ddfd-room-scope-save (scopefile rooms / fp ed hdl ent)
-  (if (and scopefile
-           (= (type scopefile) 'STR)
-           (listp rooms)
-           rooms
-           (setq fp (open scopefile "w")))
-    (progn
-      (write-line (strcat (getvar "DWGPREFIX") (getvar "DWGNAME")) fp)
-      (foreach ent rooms
-        (if (and ent
-                 (setq ed (entget ent))
-                 (setq hdl (cdr (assoc 5 ed))))
-          (write-line hdl fp)))
-      (close fp)
-      T)
-    nil))
-
-;; 交互提示并确定房间范围
-;; 返回: 实体列表 / 符号 'NO-ROOMS / nil (用户取消或无有效房间)
-(defun ddfd-room-scope-choose (scopefile / ent ed rooms)
+;; 扫描模型空间，返回 (房间图元表 CABLE_ROOM图层上未命名多段线句柄表 已命名但无效的句柄表)
+(defun ddfd-room-collect (/ ent ed layer rooms unnamed bad)
   (setq ent (entnext))
   (while ent
-    (setq ed (entget ent))
-    (if (and ed
-             (or (= (cdr (assoc 410 ed)) "Model")
-                 (/= (cdr (assoc 67 ed)) 1))
-             (ddfd-room-exportable-p ent)
-             (not (member ent rooms)))
-      (setq rooms (cons ent rooms)))
+    (setq ed (entget ent (list "DDFD_CABLE_ROOM"))
+          layer (cdr (assoc 8 ed)))
+    (if (and (member (cdr (assoc 0 ed)) '("LWPOLYLINE" "POLYLINE"))
+             (/= (cdr (assoc 67 ed)) 1))
+      (cond
+        ((ddfd-room-exportable-p ent) (setq rooms (cons ent rooms)))
+        ((assoc -3 ed) (setq bad (cons (cdr (assoc 5 ed)) bad)))
+        ((and layer (wcmatch (strcase layer) "CABLE_ROOM*"))
+         (setq unnamed (cons (cdr (assoc 5 ed)) unnamed)))))
     (setq ent (entnext ent)))
-  (if rooms (reverse rooms) 'NO-ROOMS))
+  (list (reverse rooms) (reverse unnamed) (reverse bad)))
+
+;; 在命令行按楼层列出要导出的房间，并提示同层重名、被跳过的多段线
+(defun ddfd-room-report (info / key seen dup en)
+  (princ (strcat "\n房间: " (itoa (length (car info))) " 个"))
+  (foreach en (car info)
+    (setq key (strcat (ddfd-layer-floor (cdr (assoc 8 (entget en)))) " " (ddfd-room-name en)))
+    (princ (strcat "\n  " key))
+    (if (member key seen) (setq dup (cons key dup)) (setq seen (cons key seen))))
+  (foreach key dup
+    (princ (strcat "\n注意：同层房间重名 " key "，统计时会忽略这些范围，请改名或删掉多余的一份。")))
+  (if (cadr info)
+    (princ (strcat "\n注意：CABLE_ROOM 图层上有 " (itoa (length (cadr info)))
+                   " 个未命名多段线（不是用“定义房间”建的），不会导出。输入 DDFD_ROOM_CHECK 可定位查看。")))
+  (if (caddr info)
+    (princ (strcat "\n注意：有 " (itoa (length (caddr info)))
+                   " 个已命名房间不闭合、含圆弧、面积为零或图层名看不出楼层，不会导出。输入 DDFD_ROOM_CHECK 可定位查看。")))
+  (princ))
+
+;; 把选择集缩放到可见范围（用 DXF 顶点算包围盒，不依赖 COM；临时关捕捉以免点被吸走）
+(defun ddfd-room-zoom (ss / i pt x0 y0 x1 y1 d os)
+  (setq i 0)
+  (repeat (sslength ss)
+    (foreach pt (ddfd-room-vertices (ssname ss i))
+      (setq x0 (if x0 (min x0 (car pt)) (car pt))
+            y0 (if y0 (min y0 (cadr pt)) (cadr pt))
+            x1 (if x1 (max x1 (car pt)) (car pt))
+            y1 (if y1 (max y1 (cadr pt)) (cadr pt))))
+    (setq i (1+ i)))
+  (if x0
+    (progn
+      (setq d (* 0.05 (max (- x1 x0) (- y1 y0) 1.0))
+            os (getvar "OSMODE"))
+      (setvar "OSMODE" 0)
+      (command "_.ZOOM" "_W"
+               (trans (list (- x0 d) (- y0 d) 0.0) 0 1)
+               (trans (list (+ x1 d) (+ y1 d) 0.0) 0 1))
+      (setvar "OSMODE" os))))
 
 (defun ddfd-export-rooms (filename rooms / fh result en ok)
   (if (setq fh (open filename "w"))
@@ -361,8 +318,32 @@
     nil))
 
 
-(defun ddfd-export-point-layer (pattern filename header / ss fh i en ent obj layer typ pt nm handle)
-  (setq fh (open filename "w"))
+(defun ddfd-export-point-row (fh pattern en / ent layer pt nm)
+  (setq ent (entget en))
+  (setq layer (cdr (assoc 8 ent)))
+  (setq pt (ddfd-entity-point en))
+  (setq nm (ddfd-entity-name en))
+  (if (wcmatch pattern "CABLE_CABINET*")
+    (setq nm (ddfd-remove-spaces nm))
+  )
+  (if (and pt (>= (length pt) 2))
+    (if (wcmatch pattern "CABLE_SHAFT*")
+      (ddfd-write-csv-row fh
+        (list nm (ddfd-layer-floor layer) (rtos (car pt) 2 6) (rtos (cadr pt) 2 6) "" layer (cdr (assoc 0 ent)) (cdr (assoc 5 ent))))
+      (ddfd-write-csv-row fh
+        (list nm (ddfd-layer-floor layer) "" (rtos (car pt) 2 6) (rtos (cadr pt) 2 6) layer (cdr (assoc 0 ent)) (cdr (assoc 5 ent))))
+    )
+  )
+)
+
+;; 逐个图元捕获错误：先保证文件被关闭（否则 .pending 被锁、清理不掉），
+;; 再报出出错图元的句柄；有任何图元失败就返回 nil，整次导出放弃、保留原数据
+(defun ddfd-export-fail-message (en result)
+  (princ (strcat "\n无法读取图元 " (cdr (assoc 5 (entget en))) " ("
+                 (cdr (assoc 8 (entget en))) "): " (vl-catch-all-error-message result))))
+
+(defun ddfd-export-point-layer (pattern filename header / ss fh i en result ok)
+  (setq fh (open filename "w") ok T)
   (ddfd-write-csv-row fh header)
   (setq ss (ssget "_X" (list (cons 8 pattern))))
   (if ss
@@ -370,33 +351,55 @@
       (setq i 0)
       (while (< i (sslength ss))
         (setq en (ssname ss i))
-        (setq ent (entget en))
-        (setq obj (vlax-ename->vla-object en))
-        (setq layer (cdr (assoc 8 ent)))
-        (setq typ (cdr (assoc 0 ent)))
-        (setq pt (ddfd-entity-point en))
-        (setq nm (ddfd-entity-name en))
-        (if (wcmatch pattern "CABLE_CABINET*")
-          (setq nm (ddfd-remove-spaces nm))
-        )
-        (setq handle (cdr (assoc 5 ent)))
-        (if (and pt (>= (length pt) 2))
-          (if (wcmatch pattern "CABLE_SHAFT*")
-            (ddfd-write-csv-row fh
-              (list nm (ddfd-layer-floor layer) (rtos (car pt) 2 6) (rtos (cadr pt) 2 6) "" layer typ handle))
-            (ddfd-write-csv-row fh
-              (list nm (ddfd-layer-floor layer) "" (rtos (car pt) 2 6) (rtos (cadr pt) 2 6) layer typ handle))
-          )
-        )
+        (setq result (vl-catch-all-apply 'ddfd-export-point-row (list fh pattern en)))
+        (if (vl-catch-all-error-p result) (progn (ddfd-export-fail-message en result) (setq ok nil)))
         (setq i (1+ i))
       )
     )
   )
   (close fh)
+  ok
 )
 
-(defun ddfd-export-routes (filename / ss fh i en ent obj layer handle typ endp seg p1 p2 d routeid)
-  (setq fh (open filename "w"))
+(defun ddfd-export-route-rows (fh en / ent obj layer handle typ endp seg p1 p2 d routeid)
+  (setq ent (entget en))
+  (setq layer (cdr (assoc 8 ent)))
+  (setq handle (cdr (assoc 5 ent)))
+  (setq typ (cdr (assoc 0 ent)))
+  (setq routeid (strcat "R" handle))
+  (cond
+    ((= typ "LINE")
+     (setq p1 (cdr (assoc 10 ent)))
+     (setq p2 (cdr (assoc 11 ent)))
+     (setq d (distance p1 p2))
+     (ddfd-write-csv-row fh
+       (list routeid (ddfd-layer-floor layer)
+             (rtos (car p1) 2 6) (rtos (cadr p1) 2 6)
+             (rtos (car p2) 2 6) (rtos (cadr p2) 2 6)
+             (rtos d 2 6) layer handle "1"))
+    )
+    ((member typ '("LWPOLYLINE" "POLYLINE"))
+     (setq obj (vlax-ename->vla-object en))
+     (setq endp (fix (vlax-curve-getEndParam obj)))
+     (setq seg 0)
+     (while (< seg endp)
+       (setq p1 (vlax-curve-getPointAtParam obj seg))
+       (setq p2 (vlax-curve-getPointAtParam obj (1+ seg)))
+       (setq d (- (vlax-curve-getDistAtParam obj (1+ seg))
+                  (vlax-curve-getDistAtParam obj seg)))
+       (ddfd-write-csv-row fh
+         (list routeid (ddfd-layer-floor layer)
+               (rtos (car p1) 2 6) (rtos (cadr p1) 2 6)
+               (rtos (car p2) 2 6) (rtos (cadr p2) 2 6)
+               (rtos d 2 6) layer handle (itoa (1+ seg))))
+       (setq seg (1+ seg))
+     )
+    )
+  )
+)
+
+(defun ddfd-export-routes (filename / ss fh i en result ok)
+  (setq fh (open filename "w") ok T)
   (ddfd-write-csv-row fh (list "路径编号" "楼层" "起点X" "起点Y" "终点X" "终点Y" "长度_CAD单位" "图层" "句柄" "段号"))
   (setq ss (ssget "_X" (list (cons 8 "CABLE_ROUTE*"))))
   (if ss
@@ -404,47 +407,17 @@
       (setq i 0)
       (while (< i (sslength ss))
         (setq en (ssname ss i))
-        (setq ent (entget en))
-        (setq obj (vlax-ename->vla-object en))
-        (setq layer (cdr (assoc 8 ent)))
-        (setq handle (cdr (assoc 5 ent)))
-        (setq typ (cdr (assoc 0 ent)))
-        (setq routeid (strcat "R" handle))
-        (cond
-          ((= typ "LINE")
-           (setq p1 (cdr (assoc 10 ent)))
-           (setq p2 (cdr (assoc 11 ent)))
-           (setq d (distance p1 p2))
-           (ddfd-write-csv-row fh
-             (list routeid (ddfd-layer-floor layer)
-                   (rtos (car p1) 2 6) (rtos (cadr p1) 2 6)
-                   (rtos (car p2) 2 6) (rtos (cadr p2) 2 6)
-                   (rtos d 2 6) layer handle "1"))
-          )
-          ((member typ '("LWPOLYLINE" "POLYLINE"))
-           (setq endp (fix (vlax-curve-getEndParam obj)))
-           (setq seg 0)
-           (while (< seg endp)
-             (setq p1 (vlax-curve-getPointAtParam obj seg))
-             (setq p2 (vlax-curve-getPointAtParam obj (1+ seg)))
-             (setq d (- (vlax-curve-getDistAtParam obj (1+ seg))
-                        (vlax-curve-getDistAtParam obj seg)))
-             (ddfd-write-csv-row fh
-               (list routeid (ddfd-layer-floor layer)
-                     (rtos (car p1) 2 6) (rtos (cadr p1) 2 6)
-                     (rtos (car p2) 2 6) (rtos (cadr p2) 2 6)
-                     (rtos d 2 6) layer handle (itoa (1+ seg))))
-             (setq seg (1+ seg))
-           )
-          )
-        )
+        (setq result (vl-catch-all-apply 'ddfd-export-route-rows (list fh en)))
+        (if (vl-catch-all-error-p result) (progn (ddfd-export-fail-message en result) (setq ok nil)))
         (setq i (1+ i))
       )
     )
   )
   (close fh)
+  ok
 )
 
+;; 把 .pending 换成正式文件（outdir 末尾需带反斜杠）；任一步失败则回滚
 (defun ddfd-export-commit (outdir / names fn dst bak tmp saved installed ok)
   (setq names '("柜子坐标.csv" "路径线段.csv" "竖井.csv" "房间范围.csv") ok T)
   ;; Refuse an unfinished previous transaction instead of overwriting its backup.
@@ -470,29 +443,27 @@
   ok)
 
 (defun ddfd-export-stage (outdir rooms)
-  (if (ddfd-export-rooms (strcat outdir "房间范围.csv.pending") rooms)
-    (progn
-      (ddfd-export-point-layer "CABLE_CABINET*" (strcat outdir "柜子坐标.csv.pending")
-        (list "柜子名称" "楼层" "房间" "X" "Y" "图层" "对象类型" "句柄"))
-      (ddfd-export-routes (strcat outdir "路径线段.csv.pending"))
-      (ddfd-export-point-layer "CABLE_SHAFT*" (strcat outdir "竖井.csv.pending")
-        (list "竖井编号" "楼层" "X" "Y" "高度" "图层" "对象类型" "句柄"))
-      T)
-    nil))
+  (and (ddfd-export-rooms (strcat outdir "房间范围.csv.pending") rooms)
+       (ddfd-export-point-layer "CABLE_CABINET*" (strcat outdir "柜子坐标.csv.pending")
+         (list "柜子名称" "楼层" "房间" "X" "Y" "图层" "对象类型" "句柄"))
+       (ddfd-export-routes (strcat outdir "路径线段.csv.pending"))
+       (ddfd-export-point-layer "CABLE_SHAFT*" (strcat outdir "竖井.csv.pending")
+         (list "竖井编号" "楼层" "X" "Y" "高度" "图层" "对象类型" "句柄"))))
 
-(defun ddfd-do-export (outdir / rooms scopefile result names fn)
-  (setq scopefile (strcat outdir "房间导出范围.txt"))
-  (setq rooms (ddfd-room-scope-choose scopefile))
+;; 房间可以没有（导出空的 房间范围.csv）；房间列表在导出前打印，便于当场核对
+(defun ddfd-do-export (outdir / info rooms result names fn)
+  (setq info (ddfd-room-collect))
+  (ddfd-room-report info)
+  (setq rooms (if (car info) (car info) 'NO-ROOMS))
   (if rooms
     (progn
       (setq result (vl-catch-all-apply 'ddfd-export-stage (list outdir rooms)))
       (if (and (not (vl-catch-all-error-p result)) result)
         (if (ddfd-export-commit outdir)
           (progn
-            (if (= rooms 'NO-ROOMS)
-              (if (findfile scopefile) (vl-file-delete scopefile))
-              (if (not (ddfd-room-scope-save scopefile rooms))
-                (princ "\n范围记录保存失败，下次需重新选择。")))
+            ;; 旧版本留下的房间范围记录已不再使用
+            (if (findfile (strcat outdir "房间导出范围.txt"))
+              (vl-file-delete (strcat outdir "房间导出范围.txt")))
             (princ (strcat "\n已导出四个CSV；房间数量: "
               (itoa (if (= rooms 'NO-ROOMS) 0 (length rooms)))))
             T)
@@ -502,7 +473,7 @@
         (progn
           (if (vl-catch-all-error-p result)
             (princ (strcat "\n导出阶段发生错误: " (vl-catch-all-error-message result)))
-            (princ "\n导出阶段未生成有效数据，停止后续运行。"))
+            (princ "\n有图元读取失败（见上面的句柄），本次没有覆盖项目数据。"))
           (setq names '("柜子坐标.csv" "路径线段.csv" "竖井.csv" "房间范围.csv"))
           (foreach fn names
             (if (findfile (strcat outdir fn ".pending"))
@@ -527,5 +498,45 @@
   (princ)
 )
 
-(princ "\n已加载：DDFD_EXPORT_CABLE_ROUTE")
+;; 定位房间问题：选中并缩放到 CABLE_ROOM 图层上未命名、或已命名但无效的多段线（只选中，不修改图形）
+(defun c:DDFD_ROOM_CHECK (/ info ss h en)
+  (setq info (ddfd-room-collect))
+  (ddfd-room-report info)
+  (setq ss (ssadd))
+  (foreach h (append (cadr info) (caddr info))
+    (if (setq en (handent h)) (ssadd en ss)))
+  (if (> (sslength ss) 0)
+    (progn
+      (princ "\n问题句柄:")
+      (foreach h (append (cadr info) (caddr info)) (princ (strcat " " h)))
+      (ddfd-room-zoom ss)
+      (sssetfirst nil ss)
+      (princ "\n已选中并缩放到这些多段线。图框/表格之类请在特性里改回原图层或删除；也可输入 DDFD_CLEAN_ROOM_LAYERS 把未命名的统一移到 0 层。"))
+    (princ "\n房间图层没有问题图形。"))
+  (princ))
+
+;; 把 CABLE_ROOM 图层上未命名的多段线移到 0 层：先列出并确认，U 一步即可撤销
+(defun c:DDFD_CLEAN_ROOM_LAYERS (/ info h en ed ans cnt)
+  (setq info (ddfd-room-collect))
+  (if (null (cadr info))
+    (princ "\nCABLE_ROOM 图层上没有未命名的多段线。")
+    (progn
+      (princ (strcat "\n将把 " (itoa (length (cadr info))) " 个未命名多段线移到 0 层，句柄:"))
+      (foreach h (cadr info) (princ (strcat " " h)))
+      (initget "Y N")
+      (setq ans (getkword "\n确认移动吗? [Y=是/N=否] <N>: "))
+      (if (= ans "Y")
+        (progn
+          (command "_.UNDO" "_BE")
+          (setq cnt 0)
+          (foreach h (cadr info)
+            (if (and (setq en (handent h)) (setq ed (entget en))
+                     (entmod (subst (cons 8 "0") (assoc 8 ed) ed)))
+              (setq cnt (1+ cnt))))
+          (command "_.UNDO" "_E")
+          (princ (strcat "\n已移动 " (itoa cnt) " 个到 0 层；移错了输入 U 撤销。")))
+        (princ "\n已取消，未做任何修改。"))))
+  (princ))
+
+(princ (strcat "\n已加载：DDFD_EXPORT_CABLE_ROUTE / DDFD_ROOM_CHECK / DDFD_CLEAN_ROOM_LAYERS（版本 " *ddfd-cable-version* "）"))
 (princ)

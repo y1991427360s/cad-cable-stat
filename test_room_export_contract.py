@@ -53,17 +53,48 @@ class RoomExportContracts(unittest.TestCase):
         cls.f = cls.funcs['cad_cable_wizard.lsp']
 
     def test_shared_export_functions_identical(self):
+        shared = ('ddfd-room-', 'ddfd-export-', 'ddfd-do-export', 'c:DDFD_EXPORT_CABLE_ROUTE',
+                  'c:DDFD_ROOM_CHECK', 'c:DDFD_CLEAN_ROOM_LAYERS')
+        export_funcs = self.funcs['cad_export_cable_route.lsp']
         for name in self.f:
-            if name.startswith(('ddfd-room-', 'ddfd-export-', 'ddfd-do-export')):
-                self.assertEqual(self.f[name], self.funcs['cad_export_cable_route.lsp'][name], name)
+            if name.startswith(shared):
+                self.assertEqual(self.f[name], export_funcs[name], name)
+        # 精简版里不能有向导版没有的房间/导出函数（防止残留旧实现）
+        for name in export_funcs:
+            if name.startswith(shared):
+                self.assertIn(name, self.f, name)
+
+    def test_version_banner_identical(self):
+        versions = {re.search(r'\(setq \*ddfd-cable-version\* "([^"]+)"\)', code).group(1) for code in self.code.values()}
+        self.assertEqual(len(versions), 1)
 
     def test_direct_export_without_interactive_prompts(self):
-        choose = self.f['ddfd-room-scope-choose']
-        self.assertFalse(list(calls(choose, 'getkword')))
-        self.assertFalse(list(calls(choose, 'initget')))
-        self.assertFalse(list(calls(choose, 'getstring')))
-        self.assertFalse(list(calls(choose, 'open')))
-        self.assertFalse(list(calls(choose, 'vl-file-delete')))
+        collect = self.f['ddfd-room-collect']
+        for name in ('getkword', 'initget', 'getstring', 'open', 'vl-file-delete', 'entmod', 'entdel'):
+            self.assertFalse(list(calls(collect, name)), name)
+
+    def test_room_requires_name_xdata(self):
+        # 房间图层上未命名的多段线（图框、表格等）不能当房间导出
+        entity_p = self.f['ddfd-room-entity-p']
+        self.assertIn('"DDFD_CABLE_ROOM"', str(entity_p))
+        self.assertIn(['assoc', '-3', 'ent'], list(calls(entity_p, 'assoc')))
+        self.assertNotIn('CABLE_ROOM*', str(entity_p))
+        self.assertNotIn('ddfd-room-has-named-p', self.f)
+
+    def test_step_rooms_keeps_current_layer(self):
+        # 定义房间不能把当前图层留在 CABLE_ROOM_nF，否则之后画的图形会落到房间图层
+        step = self.f['ddfd-wiz-step-rooms']
+        self.assertFalse([c for c in calls(step, 'setvar') if c[1] == '"CLAYER"'])
+        self.assertIn(['ddfd-wiz-run', '6'], list(calls(self.f['c:DDFD_CABLE_ROOMS'], 'ddfd-wiz-run')))
+        self.assertIn(['ddfd-wiz-run', '6'], list(calls(self.f['c:DDFD_CABLE_WIZARD'], 'ddfd-wiz-run')))
+        self.assertTrue(list(calls(step, 'ddfd-wiz-find-room')))
+
+    def test_clean_room_layers_confirms_and_is_undoable(self):
+        clean = self.f['c:DDFD_CLEAN_ROOM_LAYERS']
+        self.assertTrue(list(calls(clean, 'getkword')))
+        self.assertIn('"_BE"', str(clean))
+        self.assertIn('"_E"', str(clean))
+        self.assertFalse(list(calls(self.f['c:DDFD_ROOM_CHECK'], 'entmod')))
 
     def test_cancellation_gates_all_writes(self):
         fn = self.f['ddfd-do-export']
@@ -82,14 +113,9 @@ class RoomExportContracts(unittest.TestCase):
         self.assertEqual(len(list(calls(wizard, 'startapp'))), 1)
 
     def test_room_geometry_does_not_call_com(self):
-        for name in ('ddfd-room-vertices', 'ddfd-room-closed-p', 'ddfd-export-one-room'):
+        for name in ('ddfd-room-vertices', 'ddfd-room-closed-p', 'ddfd-export-one-room',
+                     'ddfd-room-collect', 'ddfd-room-zoom'):
             self.assertNotRegex(str(self.f[name]), r'vlax-curve|vla-get|vlax-ename')
-
-    def test_scope_file_is_bound_to_drawing_and_all_handles(self):
-        load = self.f['ddfd-room-scope-load']
-        self.assertIn(['getvar', '"DWGNAME"'], list(calls(load, 'getvar')))
-        self.assertIn(['setq', 'valid', 'nil'], list(calls(load, 'setq')))
-        self.assertIn(['and', 'valid', 'rooms'], list(calls(load, 'and')))
 
     def test_transaction_stages_all_four_files_before_commit(self):
         stage = str(self.f['ddfd-export-stage'])
