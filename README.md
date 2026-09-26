@@ -9,6 +9,9 @@
 ```text
 本文件夹（通用工具）
 ├─ calculate_cable_lengths.py / run_auto_stat.py   计算脚本
+├─ cable_stat/                                    模块化计算引擎与可视化模板
+├─ cable_stat_app.py / cable_stat_gui.py           桌面入口与图形工作台
+├─ build_exe.ps1                                  测试、打包、验收和发布
 ├─ cad_cable_wizard.lsp                            CAD分步引导向导（推荐）
 ├─ cad_export_cable_route.lsp                      CAD仅导出命令
 ├─ 新建项目.cmd                                     双击创建新项目文件夹
@@ -31,22 +34,38 @@
 
 **双击 `电缆统计.exe` 就是完整软件**（图形界面，不需要装 Python）：
 
-1. 点「新建项目」选位置、输名称，自动建好项目文件夹并打开；
-2. 把清册 Excel 放进项目文件夹；点「导出CAD插件」把 lsp 给 CAD，跑 `DDFD_CABLE_WIZARD` 把 CSV 导入项目 `data\`；
-3. 点「开始计算」，日志直接显示在窗口里；「打开计算结果」「打开路径可视化」一键查看，结果都在该项目的 `outputs\`。
+1. 点「新建工程」选择位置、输入名称，或用「打开工程」及左侧最近工程列表进入已有工程；
+2. 把清册 Excel 放进工程文件夹；点「导出 CAD 向导」，在 CAD 加载后运行 `DDFD_CABLE_WIZARD`，把 CSV 导入工程 `data\`；
+3. 在「工程概览」检查文件状态，在「计算参数」编辑并保存本工程的参数；
+4. 在「柜名匹配」选择未匹配的清册柜名及对应 CAD 柜名，点「加入映射」后「保存映射」。相似名称只作建议，需要人工核对；
+5. 点「开始计算」，查看阶段进度、耗时、长度汇总和带颜色的日志；在「问题清单」按错误、警告、提示筛选，选中一条可读完整说明；
+6. 用「结果工作簿」「路径可视化」打开工程 `outputs\` 中的结果。CAD 重新导出后，按 `F5` 刷新再计算。
+
+工作台支持 Windows 高 DPI；`Ctrl+O` 打开工程、`Ctrl+Enter` 开始计算。切换工程、刷新、计算或退出前会处理未保存的参数与映射；任务运行时可选择完成后自动关闭，文件写入完成后再退出。
 
 每个项目文件夹里还有一个 `一键启动.cmd`：双击它会打开软件并**自动对这个项目开算**，习惯二选一。
 
 exe 内嵌了计算引擎、项目模板和完整向导插件 `cad_cable_wizard.lsp`；根目录的 `cad_export_cable_route.lsp` 是仅供开发兼容的精简导出版，用户无需导出或加载。`.py` 源码留作开发和排查用（源码方式需要 `python -m pip install openpyxl`）。
 
-改了 Python 源码后重新打包 exe：
+当前版本为 **2026.09.26**。源码方式运行工作台：
 
 ```powershell
-python -m pip install pyinstaller
-$root = (Resolve-Path .).Path
-python -m PyInstaller --onefile --noconsole --name 电缆统计 --icon "$root\app_icon.ico" --distpath "$root" --workpath "$root\_build" --specpath "$root\_build" --clean --add-data "$root\app_icon.ico;." --add-data "$root\cad_cable_wizard.lsp;." --add-data "$root\项目模板;项目模板" "$root\cable_stat_app.py"
-# 打包完删除 _build 临时目录；验证：项目文件夹里 CABLE_STAT_SMOKETEST=1 运行 exe 看 电缆统计_自检.log
+python .\cable_stat_app.py
 ```
+
+修改 Python、LISP 或项目模板后，用已安装的 **Python 3.14、openpyxl 和 PyInstaller** 重新构建；脚本不会安装或升级依赖：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build_exe.ps1
+# 指定已安装的 Python：
+.\build_exe.ps1 -Python "C:\Python314\python.exe"
+```
+
+构建会依次执行语法检查、`python -m test_calculate_cable_lengths`、`python -m unittest discover -v`，再把单文件无控制台程序生成到 `_build_release\dist\电缆统计.exe`。exe 内嵌图标、完整 CAD 向导、项目模板和 `cable_stat\visualizer.html`。
+
+发布前，脚本自动生成独立的 `_build_release\smoke_<时间>\` 工程，用 `CABLE_STAT_SMOKETEST=1` 启动暂存 exe，核验两条合成电缆的直线/拐弯长度、别名、Excel/CSV/HTML/JSON 输出、内嵌资源，以及原清册未被改写。全部通过后，旧版复制到 `_build_release\backups\`，再替换根目录 `电缆统计.exe`；构建或验收失败会保留原发布版和诊断文件。
+
+只有显式传入 `-SkipTests` 才跳过两套测试集，语法检查与 exe 冒烟验收始终执行。冒烟超时默认 120 秒，可用 `-SmokeTimeoutSeconds 180` 调整。日志保存在对应冒烟工程的 `电缆统计_自检.log`；暂存程序、历史备份和验收工程保留供排查。
 
 也可用 PowerShell 指定项目运行：
 
@@ -79,6 +98,8 @@ CAD 侧推荐加载 `cad_cable_wizard.lsp`，执行 `DDFD_CABLE_WIZARD` 按提�
 - `柜子清单.csv`：清册中出现的柜子、坐标提供状态，缺坐标时附近似 CAD 柜名建议
 - `路径可视化.html`：本地交互页面，双击打开即可查看路径
 - `路径可视化数据.json`：HTML 页面使用的结构化路径数据
+
+路径可视化顶部的“检查线路”可选择疑似断点，自动切换楼层并显示检查点周围的线路（默认至少约 12 米范围）。地图上方提供「缩小 / 放大」「看全层」「回到检查点 · 看周边」「放大空隙 · 看细节」，也支持滚轮缩放；不再把缩小范围限制在小空隙附近。平面与三维均用编号红圈和红色虚线标出未连接的两端，红圈缩放后仍保持可辨认大小；右侧显示间隙（厘米/米）、附近柜名和处理建议，可点“上一处 / 下一处”逐个检查。也可在“问题清单”点击“在图上查看”。切换平面/三维保留当前检查点与说明，三维支持点击红圈、跨楼层逐处检查；窄窗口的说明显示在图下方，不遮挡地图。默认隐藏检查点；勾选顶部「检查点」可显示全部标记，取消勾选或点击「隐藏检查点，返回路径」会隐藏红圈/虚线并退出检查，恢复之前的楼层和电缆路径。再次点击「在图上查看」会自动显示并定位，平面和三维同步。隐藏仅影响画面，问题清单仍保留。这些标记只用于检查，不会自动接线或修改计算结果。更新软件后须重新计算工程并重新打开生成的 HTML，旧页面不会自动更新。
 
 ## 路径复核
 

@@ -1,0 +1,2008 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>电缆路径可视化</title>
+  <style>
+    :root {
+      --paper: #f4f5f2;
+      --panel: #ffffff;
+      --ink: #17211d;
+      --muted: #5d6862;
+      --line: #d9ded8;
+      --route: #9aa39d;
+      --ok: #147d64;
+      --warn: #c7791b;
+      --bad: #c43f4a;
+      --accent: #0b6f97;
+      --shaft: #9a4fb0;
+      --room: #3f7d8c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    .topbar {
+      height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 20px;
+      border-bottom: 1px solid var(--line);
+      background: #fbfcfa;
+    }
+    .brand strong { display: block; font-size: 18px; line-height: 1.1; }
+    .brand span { color: var(--muted); font-size: 12px; }
+    .metrics { display: flex; gap: 12px; align-items: center; }
+    .metric { min-width: 86px; padding: 8px 10px; border-left: 3px solid var(--accent); background: #eef3f2; }
+    .metric b { display: block; font-size: 18px; line-height: 1; }
+    .metric span { color: var(--muted); font-size: 11px; }
+    .metric.clickable { cursor: pointer; }
+    .metric.clickable:hover { background: #e2ecea; }
+    .metric.bad { border-left-color: var(--bad); }
+    .metric.sum { border-left-color: var(--ok); }
+    .top-actions { display: flex; gap: 8px; align-items: center; margin-left: 16px; }
+    .top-actions button {
+      border: 1px solid #cbd2cc; border-radius: 6px; background: #fff; color: var(--ink);
+      padding: 8px 12px; font: inherit; font-size: 13px; cursor: pointer; white-space: nowrap;
+    }
+    .top-actions button:hover { background: #f0f4f1; }
+    .top-actions .count { display: inline-block; min-width: 18px; margin-left: 4px; padding: 0 5px; border-radius: 999px; background: var(--bad); color: #fff; font-size: 11px; }
+    .top-actions .count.zero { background: var(--ok); }
+    .filter-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .filter-row select { padding: 7px 8px; }
+    .filter-meta { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 12px; }
+    .filter-meta label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+    .filter-meta input { width: auto; margin: 0; }
+    .cable-meta { margin-top: 3px; display: flex; gap: 10px; color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; }
+    .cable-sub { display: block; }
+    .list { overflow-x: hidden; }
+    .cable-meta .alert { color: var(--warn); font-weight: 700; }
+    .more { color: var(--muted); font-size: 12px; text-align: center; padding: 10px; }
+    .drawer {
+      position: fixed; top: 64px; right: 0; bottom: 0; width: min(560px, 92vw); z-index: 200;
+      background: var(--panel); border-left: 1px solid var(--line); box-shadow: -8px 0 24px rgba(23,33,29,.12);
+      display: flex; flex-direction: column; transform: translateX(105%); transition: transform .18s ease;
+    }
+    .drawer.open { transform: none; }
+    .drawer header { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+    .drawer header strong { font-size: 16px; }
+    .drawer header button { border: 0; background: transparent; font-size: 20px; cursor: pointer; color: var(--muted); }
+    .drawer .levels { display: flex; gap: 6px; padding: 10px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+    .drawer .levels button { border: 1px solid #cbd2cc; border-radius: 999px; background: #fff; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer; }
+    .drawer .levels button.active { background: var(--ink); border-color: var(--ink); color: #fff; }
+    .drawer ol { list-style: none; margin: 0; padding: 8px 16px 20px; overflow: auto; }
+    .drawer li { display: flex; gap: 8px; padding: 7px 0; border-bottom: 1px dashed var(--line); font-size: 13px; line-height: 1.5; }
+    .drawer li.cont { padding-left: 18px; }
+    .lvl { flex: none; font-size: 11px; border-radius: 4px; padding: 1px 6px; height: fit-content; color: #fff; }
+    .lvl-错误 { background: var(--bad); }
+    .lvl-警告 { background: var(--warn); }
+    .lvl-提示 { background: var(--accent); }
+    .lvl-信息 { background: var(--ok); }
+    .copy-btn { border: 1px solid #cbd2cc; border-radius: 4px; background: #fff; font-size: 11px; padding: 1px 6px; cursor: pointer; margin-left: 6px; }
+    kbd { font-family: inherit; font-size: 11px; border: 1px solid #cbd2cc; border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; background: #fff; }
+    .workspace {
+      height: calc(100vh - 64px);
+      display: grid;
+      grid-template-columns: minmax(260px, 340px) 1fr minmax(280px, 380px);
+      gap: 0;
+    }
+    aside, .stage { min-width: 0; min-height: 0; }
+    .sidebar, .detail {
+      background: var(--panel);
+      border-right: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+    }
+    .detail { border-right: 0; border-left: 1px solid var(--line); }
+    .filters { padding: 14px; border-bottom: 1px solid var(--line); display: grid; gap: 10px; }
+    input, select {
+      width: 100%;
+      border: 1px solid #cbd2cc;
+      background: #fff;
+      color: var(--ink);
+      border-radius: 6px;
+      padding: 9px 10px;
+      font: inherit;
+      font-size: 13px;
+    }
+    .list { overflow: auto; padding: 8px; }
+    .cable-item {
+      width: 100%;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--ink);
+      padding: 9px;
+      margin: 0 0 6px;
+      text-align: left;
+      cursor: pointer;
+      font: inherit;
+    }
+    .cable-item:hover { background: #f0f4f1; }
+    .cable-item.active { border-color: var(--accent); background: #e8f3f6; }
+    .cable-line { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; font-weight: 700; }
+    .cable-sub { margin-top: 4px; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .pill { display: inline-flex; align-items: center; min-width: 42px; justify-content: center; border-radius: 999px; padding: 2px 7px; font-size: 11px; color: #fff; }
+    .ok { background: var(--ok); }
+    .fail { background: var(--bad); }
+    .stage {
+      display: grid;
+      grid-template-rows: auto 1fr;
+      background:
+        linear-gradient(#dfe5df 1px, transparent 1px),
+        linear-gradient(90deg, #dfe5df 1px, transparent 1px),
+        #f9faf8;
+      background-size: 28px 28px;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.92);
+    }
+    .segmented { display: flex; gap: 6px; flex-wrap: wrap; }
+    .segmented button, .toggle {
+      border: 1px solid #cbd2cc;
+      border-radius: 6px;
+      background: #fff;
+      color: var(--ink);
+      padding: 7px 9px;
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .segmented button.active { background: var(--ink); color: #fff; border-color: var(--ink); }
+    .toggles { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .toggle input { width: auto; margin: 0 5px 0 0; }
+    .map-wrap { position: relative; min-height: 0; }
+    svg { width: 100%; height: 100%; display: block; }
+    .legend {
+      position: absolute;
+      left: 14px;
+      bottom: 14px;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      background: rgba(255,255,255,.9);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .swatch { width: 22px; height: 3px; display: inline-block; vertical-align: middle; margin-right: 5px; background: var(--route); }
+    .swatch.path { background: var(--ok); }
+    .swatch.connector { background: var(--warn); }
+    .swatch.shaft { background: var(--shaft); }
+    .swatch.room { height: 10px; border: 1px solid var(--room); background: rgba(63,125,140,0.14); }
+    .swatch.all { background: #c2d6e4; }
+    .swatch.density { height: 6px; background: linear-gradient(90deg, rgba(214,110,40,.25), rgba(214,110,40,.95)); }
+    canvas#map3d {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: none;
+      cursor: grab;
+      touch-action: none;
+    }
+    canvas#map3d.dragging { cursor: grabbing; }
+    .tooltip-3d {
+      position: absolute;
+      pointer-events: none;
+      z-index: 100;
+      background: rgba(23,33,29,0.9);
+      color: #fff;
+      padding: 5px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      white-space: nowrap;
+      display: none;
+      font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+      transform: translate(-50%, -100%);
+      margin-top: -8px;
+    }
+    .tooltip-3d::after {
+      content: "";
+      position: absolute;
+      left: 50%;
+      bottom: -6px;
+      transform: translateX(-50%);
+      border: 6px solid transparent;
+      border-top-color: rgba(23,33,29,0.9);
+    }
+    .stage[data-view="3d"] canvas#map3d { display: block; }
+    .stage[data-view="3d"] svg { display: none; }
+    .only3d { display: none !important; }
+    .stage[data-view="3d"] .only3d { display: inline-flex !important; align-items: center; }
+    .stage[data-view="3d"] .onlyplan { display: none !important; }
+    .toolbar-left { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .map-controls { position:absolute; top:12px; left:12px; right:12px; display:flex; flex-wrap:wrap; gap:6px; pointer-events:none; }
+    .map-controls button { pointer-events:auto; box-shadow:0 1px 4px #0002; }
+    .map-controls [hidden] { display:none; }
+    .toggle input[type="range"] { width: 90px; margin: 0 0 0 6px; }
+    .detail-inner { overflow: auto; padding: 16px; }
+    .detail h2 { margin: 0 0 4px; font-size: 18px; line-height: 1.25; }
+    .detail .sub { color: var(--muted); font-size: 13px; margin-bottom: 14px; }
+    .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+    .stat { border: 1px solid var(--line); border-radius: 6px; padding: 9px; background: #fbfcfa; }
+    .stat span { display: block; color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+    .stat b { font-size: 16px; }
+    .rule { border-left: 3px solid var(--accent); background: #edf5f7; padding: 10px; border-radius: 6px; font-size: 13px; margin: 12px 0; }
+    .issue { border-left-color: var(--bad); background: #fff1f2; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { border-bottom: 1px solid var(--line); padding: 7px 4px; text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    .empty { color: var(--muted); padding: 24px 8px; text-align: center; }
+    @media (max-width: 1080px) {
+      .workspace { grid-template-columns: 300px 1fr; }
+      .detail { display: none; }
+      .workspace:has(#gapInfo[style*="display: block"]) { height:auto; grid-template-rows:minmax(550px,75vh) auto; }
+      .detail:has(#gapInfo[style*="display: block"]) { display:block;grid-column:1/-1;max-height:260px;overflow:auto; }
+      .metrics { display: none; }
+    }
+    @media print {
+      .sidebar, .detail, .toolbar, .top-actions, .drawer { display: none !important; }
+      .workspace { grid-template-columns: 1fr; height: 90vh; }
+    }
+    @media (max-width: 760px) {
+      .topbar { height: auto; align-items: flex-start; padding: 12px; }
+      .workspace { height: auto; min-height: calc(100vh - 58px); grid-template-columns: 1fr; grid-template-rows: 260px 560px; }
+      .sidebar { border-right: 0; border-bottom: 1px solid var(--line); }
+      .toolbar { align-items: flex-start; flex-direction: column; }
+      .workspace:has(#gapInfo[style*="display: block"]) { grid-template-rows:260px 650px auto; }
+    }
+  </style>
+</head>
+<body>
+  <script type="application/json" id="visual-data">__VISUAL_DATA_JSON__</script>
+  <header class="topbar">
+    <div class="brand">
+      <span id="subtitle">电缆路径查看器</span>
+      <strong id="title">路径可视化</strong>
+    </div>
+    <div style="display:flex;align-items:center">
+      <div class="metrics">
+        <div class="metric clickable" id="metricTotal" title="显示全部电缆"><b id="totalCount">0</b><span>电缆总数</span></div>
+        <div class="metric clickable" id="metricOk" title="只看已计算"><b id="okCount">0</b><span>已计算</span></div>
+        <div class="metric clickable bad" id="metricFail" title="只看未计算"><b id="failCount">0</b><span>未计算</span></div>
+        <div class="metric sum"><b id="sumLength">0</b><span>自动统计合计(米)</span></div>
+      </div>
+      <div class="top-actions">
+        <button type="button" id="issuesBtn" title="结果工作簿“问题清单”里的全部内容">问题清单<span class="count" id="issueCount">0</span></button>
+        <button type="button" id="exportImage" title="把当前视图保存为 PNG 图片">导出图片</button>
+      </div>
+    </div>
+  </header>
+  <aside class="drawer" id="drawer" aria-label="问题清单">
+    <header><strong>问题清单</strong><button type="button" id="drawerClose" title="关闭（Esc）">×</button></header>
+    <div class="levels" id="issueLevels"></div>
+    <ol id="issueList"></ol>
+  </aside>
+  <main class="workspace">
+    <aside class="sidebar">
+      <div class="filters">
+        <input id="search" type="search" placeholder="搜索编号、起点、终点、型号（按 / 聚焦）">
+        <div class="filter-row">
+          <select id="statusFilter" title="计算状态">
+            <option value="ALL">全部状态</option>
+            <option value="OK">只看已计算</option>
+            <option value="FAIL">只看未计算</option>
+          </select>
+          <select id="ruleFilter" title="长度规则">
+            <option value="ALL">全部规则</option>
+            <option value="不拐弯">不拐弯</option>
+            <option value="拐弯/跨楼层">拐弯/跨楼层</option>
+            <option value="强制规则">强制规则</option>
+            <option value="CROSS">跨房间</option>
+          </select>
+        </div>
+        <div class="filter-row">
+          <select id="sortBy" title="排序">
+            <option value="row">按清册顺序</option>
+            <option value="diff">按差值（绝对值大在前）</option>
+            <option value="length">按自动统计（长在前）</option>
+            <option value="id">按电缆编号</option>
+          </select>
+          <select id="floorFilter" title="经过楼层">
+            <option value="ALL">经过任意楼层</option>
+          </select>
+        </div>
+        <div class="filter-meta">
+          <label title="自动统计与手工长度相差超过“差值提醒”参数"><input id="alertOnly" type="checkbox">只看差值超标</label>
+          <span id="listCount"></span>
+        </div>
+      </div>
+      <div id="cableList" class="list" tabindex="0"></div>
+    </aside>
+    <section class="stage">
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <div class="segmented">
+            <button type="button" id="viewPlan" class="active">平面</button>
+            <button type="button" id="view3d">三维</button>
+          </div>
+          <div id="floorTabs" class="segmented"></div>
+          <label>检查线路 <select id="gapSelect" aria-label="查看断点位置"><option value="">查看断点位置</option></select></label>
+        </div>
+        <div class="toggles">
+          <label class="toggle"><input id="showNetwork" type="checkbox" checked>路径网</label>
+          <label class="toggle" title="显示或隐藏编号红圈；取消勾选会退出检查，恢复电缆路径"><input id="showGaps" type="checkbox">检查点</label>
+          <label class="toggle"><input id="showLabels" type="checkbox" checked>标注</label>
+          <label class="toggle onlyplan" title="按经过的电缆条数给路径着色，看哪段电缆沟最满"><input id="showDensity" type="checkbox">电缆密度</label>
+          <label class="toggle only3d"><input id="showAllCables" type="checkbox" checked>全部电缆</label>
+          <label class="toggle only3d">层间距<input id="zScale" type="range" min="1" max="8" step="0.5"><span id="zScaleVal"></span></label>
+          <button class="toggle only3d" id="resetView" type="button">复位视角</button>
+        </div>
+      </div>
+      <div class="map-wrap">
+        <svg id="map" role="img" aria-label="电缆路径图"></svg>
+        <canvas id="map3d" aria-label="电缆路径三维图"></canvas>
+        <div id="tooltip3d" class="tooltip-3d"></div>
+        <div class="map-controls segmented" aria-label="调整地图视野">
+          <button type="button" id="zoomOut" title="缩小，看更大范围">− 缩小</button>
+          <button type="button" id="zoomIn" title="放大，看清局部">＋ 放大</button>
+          <button type="button" id="fitFloor">看全层</button>
+          <button type="button" id="gapContext" hidden>回到检查点 · 看周边</button>
+          <button type="button" id="gapDetail" hidden>放大空隙 · 看细节</button>
+        </div>
+        <div class="legend">
+          <span><i class="swatch"></i>固定路径</span>
+          <span><i class="swatch path"></i>本条路径</span>
+          <span><i class="swatch connector"></i>柜子接入</span>
+          <span><i class="swatch shaft"></i>竖井</span>
+          <span><i class="swatch room"></i>房间范围</span>
+          <span id="gapLegend" hidden style="color:#c43c32">◎ 编号红圈：线路可能没接上（点击查看）</span>
+          <span class="onlyplan" id="densityLegend" style="display:none"><i class="swatch density"></i>电缆密度（最多 <b id="densityMax">0</b> 条）</span>
+          <span class="only3d"><i class="swatch all"></i>全部电缆（叠加越多越深）</span>
+          <span class="only3d">中键拖动平移 · Shift+中键旋转 · 左键旋转 · 右键平移 · 滚轮缩放 · 双击复位 · 点击电缆线选中 · 楼层过滤时其他层淡显作参照</span>
+          <span class="onlyplan">中键/右键拖动平移 · 滚轮缩放 · 双击自适应 · 点柜子筛选它的电缆 · <kbd>↑</kbd><kbd>↓</kbd> 切换电缆</span>
+        </div>
+      </div>
+    </section>
+    <aside class="detail">
+      <div id="gapInfo" style="display:none;background:#fff;border:2px solid #c43c32;border-radius:8px;margin:12px;padding:12px;font-size:13px;overflow:auto"></div>
+      <div id="detail" class="detail-inner"></div>
+    </aside>
+  </main>
+  <script>
+    const data = JSON.parse(document.getElementById("visual-data").textContent);
+    data.rooms = data.rooms || [];
+    data.gaps = data.gaps || [];
+    // 数据里全部电缆共用一张去重边表（边只存节点编号），电缆的 path 存边序号，负数 ~k 表示反向走第 k 条边；
+    // 这里展开成每条电缆的 path_edges（节点对象只读共享，反向边另建一个轻量对象）
+    const nodeById = new Map((data.nodes || []).map(node => [node.id, node]));
+    const edgeTable = (data.edges || []).map(edge => ({
+      ...edge,
+      from: nodeById.get(edge.from) || { id: edge.from },
+      to: nodeById.get(edge.to) || { id: edge.to }
+    }));
+    const reversedEdges = new Map();
+    function reversedEdge(k) {
+      if (!reversedEdges.has(k)) reversedEdges.set(k, { ...edgeTable[k], from: edgeTable[k].to, to: edgeTable[k].from });
+      return reversedEdges.get(k);
+    }
+    data.cables.forEach(cable => {
+      cable.path_edges = (cable.path || []).map(k => (k >= 0 ? edgeTable[k] : reversedEdge(~k))).filter(Boolean);
+    });
+    const state = {
+      selected: Math.max(0, data.cables.findIndex(c => c.status === "OK")),
+      gap: -1,
+      floor: "ALL",
+      query: "",
+      status: "ALL",
+      rule: "ALL",
+      sort: "row",
+      pathFloor: "ALL",
+      alertOnly: false,
+      showNetwork: true,
+      showGaps: false,
+      gapReturnFloor: null,
+      showLabels: true,
+      showAllCables: true,
+      showDensity: false,
+      view: location.hash === "#3d" ? "3d" : "plan",
+      zScale: 1
+    };
+    const svg = document.getElementById("map");
+    const ns = "http://www.w3.org/2000/svg";
+    const params = data.params || {};
+    const diffAlert = Number(params["差值提醒"]) || 0;
+    const LIST_PAGE = 300;
+    let listLimit = LIST_PAGE;
+
+    // 每条边被多少条（已计算的）电缆经过：电缆密度着色、三维“全部电缆”合批、点击拾取都用它
+    const edgeUsage = new Array(edgeTable.length).fill(0);
+    const edgeCables = edgeTable.map(() => []);
+    data.cables.forEach((cable, index) => {
+      if (cable.status !== "OK") return;
+      const seen = new Set();
+      (cable.path || []).forEach(k => {
+        const e = k >= 0 ? k : ~k;
+        if (seen.has(e)) return;
+        seen.add(e);
+        edgeUsage[e] += 1;
+        edgeCables[e].push(index);
+      });
+      cable.floors = new Set();
+      cable.path_edges.forEach(edge => { if (edge.from.floor) cable.floors.add(edge.from.floor); if (edge.to.floor) cable.floors.add(edge.to.floor); });
+    });
+    const maxUsage = edgeUsage.reduce((m, v) => Math.max(m, v), 0);
+
+    document.getElementById("title").textContent = data.title || "路径可视化";
+    document.getElementById("subtitle").textContent = `电缆路径查看器 · 生成于 ${String(data.generated_at || "").replace("T", " ")}`;
+    document.title = data.title || document.title;
+    document.getElementById("totalCount").textContent = data.summary.total;
+    document.getElementById("okCount").textContent = data.summary.ok;
+    document.getElementById("failCount").textContent = data.summary.failed;
+    document.getElementById("sumLength").textContent = Number(data.summary.auto_sum || 0).toLocaleString("zh-CN");
+    document.getElementById("densityMax").textContent = maxUsage;
+    const searchInput = document.getElementById("search");
+    const statusSelect = document.getElementById("statusFilter");
+    searchInput.addEventListener("input", event => {
+      state.query = event.target.value.trim().toLowerCase();
+      listLimit = LIST_PAGE;
+      renderList();
+    });
+    statusSelect.addEventListener("change", event => {
+      state.status = event.target.value;
+      listLimit = LIST_PAGE;
+      renderList();
+    });
+    document.getElementById("ruleFilter").addEventListener("change", event => { state.rule = event.target.value; listLimit = LIST_PAGE; renderList(); });
+    document.getElementById("sortBy").addEventListener("change", event => { state.sort = event.target.value; listLimit = LIST_PAGE; renderList(); });
+    document.getElementById("alertOnly").addEventListener("change", event => { state.alertOnly = event.target.checked; listLimit = LIST_PAGE; renderList(); });
+    const floorFilter = document.getElementById("floorFilter");
+    data.floors.forEach(floor => {
+      const option = document.createElement("option");
+      option.value = floor;
+      option.textContent = `经过 ${floor}`;
+      floorFilter.appendChild(option);
+    });
+    floorFilter.addEventListener("change", event => { state.pathFloor = event.target.value; listLimit = LIST_PAGE; renderList(); });
+    function setStatusFilter(value) {
+      state.status = value;
+      statusSelect.value = value;
+      listLimit = LIST_PAGE;
+      renderList();
+    }
+    document.getElementById("metricTotal").addEventListener("click", () => setStatusFilter("ALL"));
+    document.getElementById("metricOk").addEventListener("click", () => setStatusFilter("OK"));
+    document.getElementById("metricFail").addEventListener("click", () => setStatusFilter("FAIL"));
+    document.getElementById("showNetwork").addEventListener("change", event => {
+      state.showNetwork = event.target.checked;
+      renderMap();
+    });
+    document.getElementById("showLabels").addEventListener("change", event => {
+      state.showLabels = event.target.checked;
+      renderMap();
+    });
+    document.getElementById("showAllCables").addEventListener("change", event => {
+      state.showAllCables = event.target.checked;
+      renderMap();
+    });
+    document.getElementById("showDensity").addEventListener("change", event => {
+      state.showDensity = event.target.checked;
+      document.getElementById("densityLegend").style.display = state.showDensity ? "" : "none";
+      renderMap();
+    });
+
+    function esc(value) {
+      return String(value ?? "").replace(/[&<>"']/g, ch => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[ch]));
+    }
+    function fmt(value, suffix = "") {
+      if (value === "" || value === null || value === undefined) return "未计算";
+      return `${value}${suffix}`;
+    }
+    function signed(value) {
+      return typeof value === "number" ? (value > 0 ? `+${value}` : `${value}`) : "";
+    }
+    function isOk(cable) { return cable.status === "OK"; }
+    function isAlert(cable) { return diffAlert > 0 && typeof cable.diff === "number" && Math.abs(cable.diff) >= diffAlert; }
+    function statusLabel(cable) { return isOk(cable) ? "OK" : "问题"; }
+    function mapPoint(point) { return { x: Number(point.x), y: -Number(point.y) }; }
+    function floorVisible(floor) { return state.floor === "ALL" || floor === state.floor; }
+    function edgeVisible(edge) {
+      if (state.floor === "ALL") return true;
+      return edge.from.floor === state.floor && edge.to.floor === state.floor;
+    }
+    data.cables.forEach(cable => {
+      cable.searchText = [cable.cable_id, cable.start, cable.end, cable.model, cable.status, cable.start_room, cable.end_room].join(" ").toLowerCase();
+    });
+    // 搜索支持多个关键词（空格分隔，全部命中才算），柜名里的空格在计算时已剔除
+    function matchesQuery(cable) {
+      if (!state.query) return true;
+      return state.query.split(/\s+/).every(word => cable.searchText.includes(word));
+    }
+    function filteredCables() {
+      const items = [];
+      data.cables.forEach((cable, index) => {
+        if (state.status === "OK" && !isOk(cable)) return;
+        if (state.status === "FAIL" && isOk(cable)) return;
+        if (state.rule === "CROSS" ? !cable.crosses_room : state.rule !== "ALL" && cable.rule_kind !== state.rule) return;
+        if (state.alertOnly && !isAlert(cable)) return;
+        if (state.pathFloor !== "ALL" && !(cable.floors && cable.floors.has(state.pathFloor))) return;
+        if (!matchesQuery(cable)) return;
+        items.push({ cable, index });
+      });
+      const num = value => (typeof value === "number" ? value : -Infinity);
+      if (state.sort === "diff") items.sort((a, b) => num(Math.abs(b.cable.diff)) - num(Math.abs(a.cable.diff)) || a.index - b.index);
+      else if (state.sort === "length") items.sort((a, b) => num(b.cable.auto_length) - num(a.cable.auto_length) || a.index - b.index);
+      else if (state.sort === "id") items.sort((a, b) => String(a.cable.cable_id).localeCompare(String(b.cable.cable_id), "zh-CN", { numeric: true }) || a.index - b.index);
+      return items;
+    }
+    function renderFloorTabs() {
+      const root = document.getElementById("floorTabs");
+      root.replaceChildren();
+      ["ALL", ...data.floors].forEach(floor => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = floor === "ALL" ? "全部" : floor;
+        button.className = state.floor === floor ? "active" : "";
+        button.addEventListener("click", () => {
+          clearGap();
+          state.floor = floor;
+          renderFloorTabs();
+          renderMap();
+        });
+        root.appendChild(button);
+      });
+    }
+    let currentItems = [];
+    function selectCable(index, options = {}) {
+      if (index < 0 || index >= data.cables.length) return;
+      clearGap();
+      state.selected = index;
+      renderList(options.keepScroll);
+      renderDetail();
+      renderMap();
+    }
+    // 列表分页渲染：几千条电缆时只先画前 300 条，滚到底再接着画，搜索输入不卡
+    function renderList(keepScroll) {
+      const root = document.getElementById("cableList");
+      const items = filteredCables();
+      currentItems = items;
+      const position = items.findIndex(item => item.index === state.selected);
+      if (position >= listLimit) listLimit = Math.ceil((position + 1) / LIST_PAGE) * LIST_PAGE;
+      const scrollTop = root.scrollTop;
+      root.replaceChildren();
+      document.getElementById("listCount").textContent = items.length === data.cables.length ? `共 ${items.length} 条` : `显示 ${items.length} / ${data.cables.length} 条`;
+      if (!items.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "没有匹配的电缆";
+        root.appendChild(empty);
+        return;
+      }
+      let activeButton = null;
+      const fragment = document.createDocumentFragment();
+      items.slice(0, listLimit).forEach(({ cable, index }) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `cable-item ${index === state.selected ? "active" : ""}`;
+        const alert = isAlert(cable);
+        const meta = isOk(cable)
+          ? `<span>${esc(cable.auto_length)} m</span>${typeof cable.diff === "number" ? `<span class="${alert ? "alert" : ""}">差 ${esc(signed(cable.diff))}</span>` : ""}${cable.model ? `<span>${esc(cable.model)}</span>` : ""}`
+          : `<span>${esc(cable.status)}</span>`;
+        button.innerHTML = `
+          <span class="cable-line"><span>${esc(cable.cable_id || `行 ${cable.row_no}`)}</span><span class="pill ${isOk(cable) ? "ok" : "fail"}">${statusLabel(cable)}</span></span>
+          <span class="cable-sub">${esc(cable.start)} → ${esc(cable.end)}</span>
+          <span class="cable-meta">${meta}</span>
+        `;
+        button.addEventListener("click", () => selectCable(index, { keepScroll: true }));
+        if (index === state.selected) activeButton = button;
+        fragment.appendChild(button);
+      });
+      root.appendChild(fragment);
+      if (items.length > listLimit) {
+        const more = document.createElement("div");
+        more.className = "more";
+        more.textContent = `还有 ${items.length - listLimit} 条，继续向下滚动加载`;
+        root.appendChild(more);
+      }
+      if (keepScroll) root.scrollTop = scrollTop;
+      else if (activeButton) requestAnimationFrame(() => activeButton.scrollIntoView({ block: "nearest" }));
+    }
+    document.getElementById("cableList").addEventListener("scroll", event => {
+      const root = event.target;
+      if (currentItems.length > listLimit && root.scrollTop + root.clientHeight > root.scrollHeight - 200) {
+        listLimit += LIST_PAGE;
+        renderList(true);
+      }
+    });
+    function moveSelection(step) {
+      if (!currentItems.length) return;
+      const position = currentItems.findIndex(item => item.index === state.selected);
+      const next = position < 0 ? 0 : Math.min(currentItems.length - 1, Math.max(0, position + step));
+      selectCable(currentItems[next].index);
+    }
+    document.addEventListener("keydown", event => {
+      const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement;
+      if (event.key === "Escape") {
+        if (drawer.classList.contains("open")) { drawer.classList.remove("open"); return; }
+        if (typing && event.target === searchInput && searchInput.value) {
+          searchInput.value = "";
+          state.query = "";
+          renderList();
+        }
+        return;
+      }
+      if (event.key === "/" && !typing) { event.preventDefault(); searchInput.focus(); searchInput.select(); return; }
+      if ((event.key === "ArrowDown" || event.key === "ArrowUp") && (!typing || event.target === searchInput)) {
+        event.preventDefault();
+        moveSelection(event.key === "ArrowDown" ? 1 : -1);
+      }
+    });
+
+    // ---------- 问题清单抽屉 ----------
+    const drawer = document.getElementById("drawer");
+    const issues = (data.issues || []).map(item => (typeof item === "string" ? { level: "警告", text: item } : item));
+    let gapIssueIndex = 0;
+    issues.forEach(item => {
+      if (/^疑似断点.*?：/.test(item.text) && !item.text.startsWith("疑似断点：另有") && gapIssueIndex < data.gaps.length) item.gapIndex = gapIssueIndex++;
+    });
+    function gapDistance(gap) {
+      const metres = Number(gap.dist_m);
+      return metres < 1 ? `${Number((metres * 100).toFixed(1))} 厘米` : `${Number(metres.toFixed(2))} 米`;
+    }
+    function setGapVisibility(visible) {
+      state.showGaps = visible;
+      document.getElementById("showGaps").checked = visible;
+      document.getElementById("gapLegend").hidden = !visible;
+    }
+    document.getElementById("showGaps").addEventListener("change", event => {
+      if (event.target.checked) setGapVisibility(true);
+      else clearGap();
+      renderMap();
+    });
+    function clearGap() {
+      if (state.gap >= 0) {
+        resetCamera();
+        if (state.gapReturnFloor !== null) state.floor = state.gapReturnFloor;
+        renderFloorTabs();
+      }
+      state.gapReturnFloor = null;
+      setGapVisibility(false);
+      clearTimeout(pickTimer);
+      gapHits = [];
+      document.getElementById("tooltip3d").style.display = "none";
+      state.gap = -1;
+      document.getElementById("gapContext").hidden = true;
+      document.getElementById("gapDetail").hidden = true;
+      planUserView = false;
+      document.getElementById("gapSelect").value = "";
+      document.getElementById("gapInfo").style.display = "none";
+      document.getElementById("detail").style.display = "";
+    }
+    function focusGap(index) {
+      const gap = data.gaps[index];
+      if (!gap) return;
+      if (state.gap < 0) state.gapReturnFloor = state.floor;
+      setGapVisibility(true);
+      state.gap = index;
+      state.gapScope = "context";
+      document.getElementById("gapContext").hidden = false;
+      document.getElementById("gapDetail").hidden = false;
+      state.floor = gap.floor || "ALL";
+      state.showNetwork = true;
+      document.getElementById("showNetwork").checked = true;
+      document.getElementById("gapSelect").value = String(index);
+      planUserView = false;
+      drawer.classList.remove("open");
+      renderFloorTabs();
+      if (state.view === "3d") focusGapCamera();
+      setView(state.view);
+      const nearby = data.cabinets.filter(c => c.floor === gap.floor).sort((a,b) => Math.hypot(a.x-gap.x,a.y-gap.y)-Math.hypot(b.x-gap.x,b.y-gap.y)).slice(0,2);
+      const info = document.getElementById("gapInfo");
+      info.style.display = "block";
+      document.getElementById("detail").style.display = "none";
+      info.innerHTML = `<strong>检查点 ${index + 1} · ${esc(gap.floor || "未知楼层")} · 差 ${esc(gapDistance(gap))} 没接上</strong>
+        <p>${gap.bridging ? "这里的两侧线路互不连通，可能导致部分电缆算不出来。" : "电缆不能直接跨过这里，计算时可能绕远、长度偏大。"}</p>
+        <svg viewBox="0 0 280 66" role="img" aria-label="空隙示意图（不按比例）" style="width:100%;height:66px"><path d="M10 42 H105 M170 20 V60 M170 42 H270" fill="none" stroke="#596b66" stroke-width="5"/><path d="M105 42 H170" stroke="#c43c32" stroke-width="3" stroke-dasharray="5 4"/><circle cx="105" cy="42" r="5" fill="#c43c32"/><text x="138" y="14" text-anchor="middle" font-size="12" fill="#c43c32">中间有空隙</text></svg>
+        <div style="color:#667">上图为示意；地图红色虚线标出实际空隙。</div>
+        <p>附近柜子：${nearby.map(c=>esc(c.name)).join("、") || "暂无柜名参考"}</p>
+        <p>先看周围线路找位置，再点「看细节」检查空隙。可用上方按钮或滚轮自由缩放；切到三维也能查看同一处。</p>
+        <p>本来应该连通：在 CAD 把线头接上，再导出计算。<br>本来就应分开：可以忽略此提醒。</p>
+        <button type="button" id="gapPrevious" ${index===0?"disabled":""}>上一处</button>
+        <button type="button" id="gapNext" ${index===data.gaps.length-1?"disabled":""}>下一处</button>
+        <button type="button" id="gapExit">隐藏检查点，返回路径</button>`;
+      document.getElementById("gapPrevious").onclick = () => focusGap(index-1);
+      document.getElementById("gapNext").onclick = () => focusGap(index+1);
+      document.getElementById("gapExit").onclick = () => { clearGap(); renderMap(); };
+    }
+    const gapSelect = document.getElementById("gapSelect");
+    gapSelect.options[0].textContent = data.gaps.length ? `查看 ${data.gaps.length} 处未接上的位置` : "未发现疑似断点";
+    gapSelect.disabled = !data.gaps.length;
+    document.getElementById("showGaps").disabled = !data.gaps.length;
+    data.gaps.forEach((gap,index) => {
+      const option = document.createElement("option"); option.value = index;
+      option.textContent = `${index+1} · ${gap.floor || "未知楼层"} · 间隙 ${gapDistance(gap)}`;
+      gapSelect.appendChild(option);
+    });
+    gapSelect.onchange = () => { if(gapSelect.value !== "") focusGap(Number(gapSelect.value)); else {clearGap();renderMap();} };
+    let issueLevel = "ALL";
+    const problemCount = issues.filter(item => item.level === "错误" || item.level === "警告").filter(item => !item.text.startsWith(" ")).length;
+    const issueCountEl = document.getElementById("issueCount");
+    issueCountEl.textContent = problemCount;
+    issueCountEl.className = problemCount ? "count" : "count zero";
+    function renderIssues() {
+      const levelsRoot = document.getElementById("issueLevels");
+      levelsRoot.replaceChildren();
+      ["ALL", "错误", "警告", "提示", "信息"].forEach(level => {
+        const count = level === "ALL" ? issues.length : issues.filter(item => item.level === level).length;
+        if (level !== "ALL" && !count) return;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = issueLevel === level ? "active" : "";
+        button.textContent = `${level === "ALL" ? "全部" : level} ${count}`;
+        button.addEventListener("click", () => { issueLevel = level; renderIssues(); });
+        levelsRoot.appendChild(button);
+      });
+      const list = document.getElementById("issueList");
+      list.replaceChildren();
+      const shown = issues.filter(item => issueLevel === "ALL" || item.level === issueLevel);
+      if (!shown.length) {
+        list.innerHTML = '<li class="empty">未发现问题</li>';
+        return;
+      }
+      shown.forEach(item => {
+        const li = document.createElement("li");
+        const cont = item.text.startsWith(" ");
+        if (cont) li.className = "cont";
+        li.innerHTML = `${cont ? "" : `<span class="lvl lvl-${esc(item.level)}">${esc(item.level)}</span>`}<span>${esc(item.text.trim())}</span>`;
+        if (item.gapIndex !== undefined) {
+          const gap = data.gaps[item.gapIndex];
+          li.lastElementChild.textContent = `检查点 ${item.gapIndex+1}：${gap.floor || "未知楼层"} 有一处线路差 ${gapDistance(gap)} 没接上。${gap.bridging ? "可能导致电缆算不出来。" : "可能导致绕远。"}`;
+          const locate = document.createElement("button"); locate.type="button"; locate.textContent="在图上查看";
+          locate.onclick=()=>focusGap(item.gapIndex); li.appendChild(locate);
+        } else if (item.text.startsWith("提示：已自动连通")) {
+          li.lastElementChild.textContent = item.text.replace(/^提示：/, "").replace(/（.*）/, "，已经接好，无需处理。");
+        }
+        list.appendChild(li);
+      });
+    }
+    document.getElementById("issuesBtn").addEventListener("click", () => {
+      renderIssues();
+      drawer.classList.toggle("open");
+    });
+    document.getElementById("drawerClose").addEventListener("click", () => drawer.classList.remove("open"));
+    function collectBoundsPoints(cable) {
+      const points = [];
+      const visiblePathEdges = cable.path_edges.filter(edgeVisible);
+      if (visiblePathEdges.length) {
+        visiblePathEdges.forEach(edge => points.push(mapPoint(edge.from), mapPoint(edge.to)));
+        data.cabinets.forEach(cab => {
+          if ((cab.name === cable.start || cab.name === cable.end) && floorVisible(cab.floor)) points.push(mapPoint(cab));
+        });
+        data.shafts.forEach(shaft => {
+          const used = cable.path_edges.some(edge => edge.shaft_id && edge.shaft_id === shaft.base_id);
+          if (used && floorVisible(shaft.floor)) points.push(mapPoint(shaft));
+        });
+        return points.filter(point => Number.isFinite(point.x) && Number.isFinite(point.y));
+      }
+      if (state.showNetwork) {
+        data.route_segments.forEach(seg => {
+          if (!floorVisible(seg.floor)) return;
+          points.push(mapPoint({ x: seg.ax, y: seg.ay }), mapPoint({ x: seg.bx, y: seg.by }));
+        });
+      }
+      data.rooms.forEach(room => {
+        if (!floorVisible(room.floor)) return;
+        room.vertices.forEach(([x, y]) => points.push(mapPoint({ x, y })));
+      });
+      data.cabinets.forEach(cab => {
+        if (floorVisible(cab.floor)) points.push(mapPoint(cab));
+      });
+      data.shafts.forEach(shaft => {
+        if (floorVisible(shaft.floor)) points.push(mapPoint(shaft));
+      });
+      cable.path_edges.forEach(edge => {
+        if (edgeVisible(edge)) points.push(mapPoint(edge.from), mapPoint(edge.to));
+      });
+      if (!points.length) {
+        data.route_segments.forEach(seg => points.push(mapPoint({ x: seg.ax, y: seg.ay }), mapPoint({ x: seg.bx, y: seg.by })));
+      }
+      return points.filter(point => Number.isFinite(point.x) && Number.isFinite(point.y));
+    }
+    function floorBounds(floor) {
+      const points = [];
+      data.route_segments.filter(s => floor === "ALL" || s.floor === floor).forEach(s => points.push({x:s.ax,y:s.ay},{x:s.bx,y:s.by}));
+      data.cabinets.filter(c => floor === "ALL" || c.floor === floor).forEach(c => points.push(c));
+      data.rooms.filter(r => floor === "ALL" || r.floor === floor).forEach(r => r.vertices.forEach(([x,y]) => points.push({x,y})));
+      const unit = Number(params["CAD每米单位"] || 1000);
+      if (!points.length) return {minX:0,minY:0,width:unit*12,height:unit*12};
+      const b = points.reduce((b,p) => ({x0:Math.min(b.x0,p.x),x1:Math.max(b.x1,p.x),y0:Math.min(b.y0,p.y),y1:Math.max(b.y1,p.y)}), {x0:Infinity,x1:-Infinity,y0:Infinity,y1:-Infinity});
+      const pad = Math.max(b.x1-b.x0,b.y1-b.y0,unit)*0.12;
+      return {minX:b.x0-pad,minY:-b.y1-pad,width:b.x1-b.x0+pad*2,height:b.y1-b.y0+pad*2};
+    }
+    function gapSpan(g, detail = false) {
+      const unit = Number(params["CAD每米单位"] || 1000);
+      if (detail) return Math.max(unit*0.2,Number(g.dist)*10,1e-6);
+      const b = floorBounds(g.floor);
+      const nearby = data.cabinets.filter(c => c.floor === g.floor).map(c => Math.hypot(c.x-g.x,c.y-g.y)).sort((a,b)=>a-b);
+      return Math.max(unit*12, Number(g.dist)*20, Math.min((nearby[1] || nearby[0] || 0)*2.6, Math.max(b.width,b.height)*0.6));
+    }
+    function nearbyGapCabinets() {
+      const g=data.gaps[state.gap];
+      return g ? data.cabinets.filter(c=>c.floor===g.floor).sort((a,b)=>Math.hypot(a.x-g.x,a.y-g.y)-Math.hypot(b.x-g.x,b.y-g.y)).slice(0,2) : [];
+    }
+    function boundsFor(cable) {
+      if (state.gap >= 0 && state.gapScope === "floor") return floorBounds(state.floor);
+      if (state.gap >= 0) {
+        const g = data.gaps[state.gap];
+        const span = gapSpan(g, state.gapScope === "detail");
+        return { minX:(g.x+g.px)/2-span/2, minY:-(g.y+g.py)/2-span/2, width:span, height:span, span };
+      }
+      const points = collectBoundsPoints(cable);
+      if (!points.length) return { minX: 0, minY: 0, width: 1000, height: 1000, span: 1000 };
+      // 用循环求极值：点数上万时 Math.min(...数组) 会爆调用栈
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      points.forEach(p => {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+      });
+      const span = Math.max(maxX - minX, maxY - minY, 1000);
+      const pad = span * 0.08;
+      return { minX: minX - pad, minY: minY - pad, width: (maxX - minX) + pad * 2, height: (maxY - minY) + pad * 2, span };
+    }
+    function addTitle(element, text) {
+      const title = document.createElementNS(ns, "title");
+      title.textContent = text;
+      element.appendChild(title);
+    }
+    function addLine(root, a, b, options) {
+      const line = document.createElementNS(ns, "line");
+      const pa = mapPoint(a);
+      const pb = mapPoint(b);
+      line.setAttribute("x1", pa.x);
+      line.setAttribute("y1", pa.y);
+      line.setAttribute("x2", pb.x);
+      line.setAttribute("y2", pb.y);
+      line.setAttribute("stroke", options.stroke);
+      line.setAttribute("stroke-width", options.width);
+      line.setAttribute("stroke-linecap", "round");
+      line.setAttribute("fill", "none");
+      if (options.dash) line.setAttribute("stroke-dasharray", options.dash);
+      if (options.opacity) line.setAttribute("opacity", options.opacity);
+      root.appendChild(line);
+      return line;
+    }
+    function addCircle(root, point, options) {
+      const p = mapPoint(point);
+      const circle = document.createElementNS(ns, "circle");
+      circle.setAttribute("cx", p.x);
+      circle.setAttribute("cy", p.y);
+      circle.setAttribute("r", options.r);
+      circle.setAttribute("fill", options.fill);
+      circle.setAttribute("stroke", options.stroke || "#fff");
+      circle.setAttribute("stroke-width", options.strokeWidth || options.r * 0.35);
+      root.appendChild(circle);
+      return circle;
+    }
+    function addLabel(root, point, text, options) {
+      if (!state.showLabels || !text) return;
+      const p = mapPoint(point);
+      const label = document.createElementNS(ns, "text");
+      label.setAttribute("x", p.x + options.dx);
+      label.setAttribute("y", p.y + options.dy);
+      label.setAttribute("font-size", options.size);
+      label.setAttribute("fill", options.fill || "#17211d");
+      label.setAttribute("paint-order", "stroke");
+      label.setAttribute("stroke", "#fff");
+      label.setAttribute("stroke-width", options.size * 0.22);
+      label.textContent = text;
+      root.appendChild(label);
+      return label;
+    }
+    function addRoom(root, room, lineWidth, labelSize) {
+      if (!room.vertices.length) return;
+      const polygon = document.createElementNS(ns, "polygon");
+      polygon.setAttribute("points", room.vertices.map(([x, y]) => `${x},${-Number(y)}`).join(" "));
+      polygon.setAttribute("fill", "rgba(63,125,140,0.10)");
+      polygon.setAttribute("stroke", "var(--room)");
+      polygon.setAttribute("stroke-width", lineWidth);
+      polygon.setAttribute("stroke-dasharray", `${lineWidth * 4} ${lineWidth * 2}`);
+      root.appendChild(polygon);
+      const center = room.vertices.reduce((acc, point) => ({ x: acc.x + Number(point[0]) / room.vertices.length, y: acc.y + Number(point[1]) / room.vertices.length }), { x: 0, y: 0 });
+      addLabel(root, center, room.name, { dx: 0, dy: 0, size: labelSize * 0.75, fill: "var(--room)" });
+    }
+    function renderPlan() {
+      const cable = data.cables[state.selected] || data.cables[0] || { path_edges: [] };
+      const nearby = new Set(nearbyGapCabinets());
+      // 换了选中电缆或楼层就恢复自适应；纯显示开关等重绘保留用户手动调过的视口
+      const sameTarget = planKeep.selected === state.selected && planKeep.floor === state.floor;
+      const keepBox = planUserView && sameTarget ? svg.getAttribute("viewBox") : null;
+      planKeep = { selected: state.selected, floor: state.floor };
+      if (!keepBox) planUserView = false;
+      const box = boundsFor(cable);
+      const width = state.gap >= 0 ? box.width : Math.max(box.width, 1000);
+      const height = state.gap >= 0 ? box.height : Math.max(box.height, 1000);
+      const size = Math.max(width, height);
+      const networkWidth = state.gap >= 0 ? size / 900 : Math.max(size / 1200, 18);
+      const pathWidth = Math.min(Math.max(size / 520, 28), 140);
+      const pointR = Math.min(Math.max(size / 500, 22), 120);
+      const labelSize = Math.min(Math.max(size / 220, 18), 180);
+      svg.setAttribute("viewBox", keepBox || `${box.minX} ${box.minY} ${width} ${height}`);
+      planBaseWidth = width;
+      svg.replaceChildren();
+      const base = document.createElementNS(ns, "g");
+      const overlay = document.createElementNS(ns, "g");
+      svg.appendChild(base);
+      svg.appendChild(overlay);
+      data.rooms.forEach(room => {
+        if (floorVisible(room.floor)) addRoom(base, room, networkWidth * 0.9, labelSize);
+      });
+      if (state.showNetwork) {
+        data.route_segments.forEach(seg => {
+          if (!floorVisible(seg.floor)) return;
+          const line = addLine(base, { x: seg.ax, y: seg.ay }, { x: seg.bx, y: seg.by }, {
+            stroke: "var(--route)", width: networkWidth, opacity: state.gap >= 0 ? "1" : "0.55"
+          });
+          if (state.gap >= 0) {
+            line.setAttribute("vector-effect","non-scaling-stroke");
+            line.setAttribute("stroke-width","1.5");
+          }
+          addTitle(line, `路径 ${seg.route_id}${seg.section_no ? ":" + seg.section_no : ""}（${seg.floor || "未知楼层"}，${seg.length_m} m）`);
+        });
+      }
+      // 电缆密度：每段路按经过的电缆条数加粗、加深，找出最满的电缆沟/桥架
+      if (state.showDensity && maxUsage > 0) {
+        edgeTable.forEach((edge, k) => {
+          const used = edgeUsage[k];
+          if (!used || edge.kind === "shaft" || !edgeVisible(edge)) return;
+          const t = used / maxUsage;
+          const line = addLine(base, edge.from, edge.to, {
+            stroke: `rgba(214,110,40,${(0.22 + 0.73 * t).toFixed(3)})`, width: networkWidth * (1.2 + 5 * t)
+          });
+          addTitle(line, `经过 ${used} 条电缆`);
+        });
+      }
+      data.shafts.forEach(shaft => {
+        if (!floorVisible(shaft.floor)) return;
+        const circle = addCircle(base, shaft, { r: pointR * 0.72, fill: "var(--shaft)", stroke: "#fff" });
+        addTitle(circle, `竖井 ${shaft.shaft_id}（${shaft.floor}，高 ${shaft.height_m} m）`);
+        addLabel(base, shaft, shaft.shaft_id, { dx: pointR * 1.2, dy: -pointR * 0.7, size: labelSize * 0.75, fill: "var(--shaft)" });
+      });
+      data.cabinets.forEach(cab => {
+        if (!floorVisible(cab.floor)) return;
+        const selected = state.gap < 0 && (cab.name === cable.start || cab.name === cable.end);
+        const circle = addCircle(base, cab, { r: selected ? pointR * 1.15 : pointR * 0.55, fill: selected ? "var(--accent)" : "#69756f", stroke: "#fff" });
+        circle.style.cursor = "pointer";
+        addTitle(circle, `${cab.name}（${cab.floor}）— 点击筛选这个柜子的电缆`);
+        circle.addEventListener("click", () => filterByCabinet(cab.name));
+        if (selected) addLabel(overlay, cab, cab.name, { dx: pointR * 1.5, dy: pointR * 0.4, size: labelSize * 0.8, fill: "var(--accent)" });
+        else if (nearby.has(cab)) {
+          const label=addLabel(overlay,cab,cab.name,{dx:pointR,dy:-pointR,size:labelSize*0.8});
+          if(label) {label.dataset.contextX=cab.x;label.dataset.contextY=cab.y;}
+        }
+      });
+      (state.gap >= 0 ? [] : cable.path_edges).forEach(edge => {
+        if (!edgeVisible(edge)) return;
+        const stroke = edge.kind === "connector" ? "var(--warn)" : edge.kind === "shaft" ? "var(--shaft)" : "var(--ok)";
+        addLine(overlay, edge.from, edge.to, {
+          stroke,
+          width: edge.kind === "connector" ? pathWidth * 0.72 : pathWidth,
+          dash: edge.kind === "shaft" ? `${pathWidth * 2} ${pathWidth * 1.4}` : "",
+          opacity: "0.95"
+        });
+      });
+      if (state.gap < 0 && isOk(cable)) {
+        addLabel(overlay, cable.path_edges[0]?.from || {}, "起点", { dx: pointR * 1.1, dy: -pointR * 1.4, size: labelSize, fill: "var(--ok)" });
+        const last = cable.path_edges[cable.path_edges.length - 1];
+        addLabel(overlay, last?.to || {}, "终点", { dx: pointR * 1.1, dy: pointR * 2.2, size: labelSize, fill: "var(--bad)" });
+      }
+      (state.showGaps ? data.gaps : []).forEach((gap,index) => {
+        if (!floorVisible(gap.floor)) return;
+        const group = document.createElementNS(ns,"g"); overlay.appendChild(group);
+        group.setAttribute("role","button"); group.setAttribute("tabindex","0");
+        group.setAttribute("aria-label",`检查点 ${index+1}，${gap.floor}，间隙 ${gapDistance(gap)}`);
+        group.style.cursor="pointer";
+        group.dataset.gapIndex = index;
+        const r=size/40;
+        addCircle(group,gap,{r,fill:"#fff8",stroke:"#c43c32",strokeWidth:size/400});
+        const link=addLine(group,gap,{x:gap.px,y:gap.py},{stroke:"#c43c32",width:2,dash:"5 4"});
+        link.setAttribute("vector-effect","non-scaling-stroke");
+        addCircle(group,gap,{r:size/350,fill:"#c43c32",strokeWidth:size/1500});
+        addCircle(group,{x:gap.px,y:gap.py},{r:size/350,fill:"#c43c32",strokeWidth:size/1500});
+        const label=document.createElementNS(ns,"text"); label.setAttribute("x",gap.x+r); label.setAttribute("y",-gap.y-r);
+        label.setAttribute("font-size",size/32); label.setAttribute("fill","#c43c32"); label.setAttribute("stroke","white");label.setAttribute("stroke-width",size/400);label.setAttribute("paint-order","stroke");label.textContent=String(index+1);group.appendChild(label);
+        addTitle(group,`检查点 ${index+1}：差 ${gapDistance(gap)} 没接上，点击查看`);
+        group.onclick=()=>focusGap(index);
+        group.onkeydown=event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();focusGap(index);}};
+      });
+      updateGapMarkers();
+    }
+    function updateGapMarkers() {
+      const vb = planViewBox();
+      if (!vb) return;
+      const k = planUnitsPerPixel(vb);
+      const placed = [];
+      svg.querySelectorAll("[data-context-x]").forEach(label=>{
+        const x=Number(label.dataset.contextX)+7*k;
+        let y=-Number(label.dataset.contextY)-7*k;
+        label.setAttribute("x",x);
+        label.setAttribute("font-size",12*k);label.setAttribute("stroke-width",3*k);
+        const width=label.getComputedTextLength();
+        for(let tries=0;tries<placed.length+1;tries++) {
+          if(!placed.some(p=>x<p.x+p.width && x+width>p.x && Math.abs(y-p.y)<16*k)) break;
+          y+=18*k;
+        }
+        label.setAttribute("y",y);placed.push({x,y,width});
+      });
+      svg.querySelectorAll("[data-gap-index]").forEach(group => {
+        const index = Number(group.dataset.gapIndex), g = data.gaps[index];
+        const active = index === state.gap, r = (active ? 17 : 12)*k;
+        group.querySelectorAll("circle").forEach((c,i) => {
+          c.setAttribute("r", i === 0 ? r : 2.5*k);
+          c.setAttribute("stroke-width", (i === 0 ? (active ? 3 : 2) : 0.5)*k);
+        });
+        const label = group.querySelector("text");
+        label.setAttribute("x",g.x+r+3*k); label.setAttribute("y",-g.y-r);
+        label.setAttribute("font-size",14*k); label.setAttribute("stroke-width",3*k);
+      });
+    }
+    function setPlanBox(vb) {
+      svg.setAttribute("viewBox",vb.join(" "));
+      updateGapMarkers();
+    }
+    // ---------- 平面视图交互：中键拖动平移、滚轮缩放、双击恢复自适应（只改 viewBox，不重建图形） ----------
+    let planDrag = null;
+    let planUserView = false;
+    let planBaseWidth = 1000;
+    let planKeep = { selected: -1, floor: "ALL" };
+    function wheelDeltaY(event) {
+      // Firefox 等浏览器 deltaMode 可能是“行/页”而非像素，统一折算成像素
+      if (event.deltaMode === 1) return event.deltaY * 33;
+      if (event.deltaMode === 2) return event.deltaY * 300;
+      return event.deltaY;
+    }
+    function planViewBox() {
+      const vb = (svg.getAttribute("viewBox") || "").trim().split(/ +/).map(Number);
+      return vb.length === 4 && vb.every(Number.isFinite) && vb[2] > 0 && vb[3] > 0 ? vb : null;
+    }
+    function planUnitsPerPixel(vb) {
+      const w = svg.clientWidth;
+      const h = svg.clientHeight;
+      if (!w || !h) return 1;
+      // preserveAspectRatio 默认 xMidYMid meet：内容按较紧的一边缩放并居中
+      return Math.max(vb[2] / w, vb[3] / h);
+    }
+    svg.addEventListener("mousedown", event => {
+      if (event.button !== 1 && event.button !== 2) return;
+      event.preventDefault();
+      planDrag = { x: event.clientX, y: event.clientY, button: event.button };
+    });
+    svg.addEventListener("contextmenu", event => event.preventDefault());
+    window.addEventListener("mousemove", event => {
+      if (!planDrag) return;
+      const vb = planViewBox();
+      if (!vb) return;
+      const k = planUnitsPerPixel(vb);
+      vb[0] -= (event.clientX - planDrag.x) * k;
+      vb[1] -= (event.clientY - planDrag.y) * k;
+      planDrag.x = event.clientX;
+      planDrag.y = event.clientY;
+      planUserView = true;
+      setPlanBox(vb);
+    });
+    window.addEventListener("mouseup", event => {
+      if (planDrag && event.button === planDrag.button) planDrag = null;
+    });
+    // 点柜子：列表只留与它相连的电缆（再点一次同一个柜子取消）
+    function filterByCabinet(name) {
+      const next = state.query === name.toLowerCase() ? "" : name;
+      searchInput.value = next;
+      state.query = next.toLowerCase();
+      listLimit = LIST_PAGE;
+      renderList();
+    }
+    svg.addEventListener("wheel", event => {
+      event.preventDefault();
+      const vb = planViewBox();
+      if (!vb) return;
+      zoomPlan(Math.exp(wheelDeltaY(event) * 0.0012), event.clientX, event.clientY);
+    }, { passive: false });
+    function zoomPlan(factor, clientX, clientY) {
+      const vb = planViewBox();
+      if (!vb) return;
+      const full = floorBounds(state.floor);
+      const minW = Number(params["CAD每米单位"] || 1000)*0.01;
+      const maxW = Math.max(full.width,full.height,planBaseWidth)*10;
+      const f = Math.max(minW,Math.min(maxW,vb[2]*factor))/vb[2];
+      // 缩放限幅：防止无限缩放导致浮点精度崩溃或 viewBox 溢出后交互静默失效
+      const nextW = vb[2] * f;
+      if (!Number.isFinite(nextW)) return;
+      const rect = svg.getBoundingClientRect();
+      const k = planUnitsPerPixel(vb);
+      // 鼠标位置对应的用户坐标（xMidYMid：屏幕中心对应 viewBox 中心）
+      const px = vb[0] + vb[2] / 2 + ((clientX ?? rect.left+rect.width/2) - rect.left - rect.width / 2) * k;
+      const py = vb[1] + vb[3] / 2 + ((clientY ?? rect.top+rect.height/2) - rect.top - rect.height / 2) * k;
+      vb[0] = px - (px - vb[0]) * f;
+      vb[1] = py - (py - vb[1]) * f;
+      vb[2] *= f;
+      vb[3] *= f;
+      planUserView = true;
+      setPlanBox(vb);
+    }
+    svg.addEventListener("dblclick", () => {
+      planUserView = false;
+      renderPlan();
+    });
+
+    // ---------- 三维视图 ----------
+    const stage = document.querySelector(".stage");
+    const canvas = document.getElementById("map3d");
+    const ctx = canvas.getContext("2d");
+    const floorElevations = data.floor_elevations || {};
+    const floorOffsets = data.floor_offsets || {};
+    const floorIndex = new Map(data.floors.map((floor, i) => [floor, i]));
+    let lastProjector = null;
+
+    function baseZ(floor) {
+      if (Object.prototype.hasOwnProperty.call(floorElevations, floor)) return Number(floorElevations[floor]) || 0;
+      return (floorIndex.get(floor) || 0) * 4500;
+    }
+    function zOf(floor) { return baseZ(floor) * state.zScale; }
+    function wx(floor, x) { return Number(x) + (floorOffsets[floor] ? Number(floorOffsets[floor].dx) || 0 : 0); }
+    function wy(floor, y) { return Number(y) + (floorOffsets[floor] ? Number(floorOffsets[floor].dy) || 0 : 0); }
+
+    const scene = (() => {
+      const xs = [];
+      const ys = [];
+      data.route_segments.forEach(seg => {
+        xs.push(wx(seg.floor, seg.ax), wx(seg.floor, seg.bx));
+        ys.push(wy(seg.floor, seg.ay), wy(seg.floor, seg.by));
+      });
+      data.cabinets.forEach(cab => { xs.push(wx(cab.floor, cab.x)); ys.push(wy(cab.floor, cab.y)); });
+      data.shafts.forEach(shaft => { xs.push(wx(shaft.floor, shaft.x)); ys.push(wy(shaft.floor, shaft.y)); });
+      data.rooms.forEach(room => room.vertices.forEach(([x, y]) => { xs.push(wx(room.floor, x)); ys.push(wy(room.floor, y)); }));
+      const fx = xs.filter(Number.isFinite);
+      const fy = ys.filter(Number.isFinite);
+      if (!fx.length || !fy.length) return { minX: 0, maxX: 1000, minY: 0, maxY: 1000 };
+      const lo = arr => arr.reduce((m, v) => (v < m ? v : m), Infinity);
+      const hi = arr => arr.reduce((m, v) => (v > m ? v : m), -Infinity);
+      return { minX: lo(fx), maxX: hi(fx), minY: lo(fy), maxY: hi(fy) };
+    })();
+    const zTop = Math.max(...data.floors.map(baseZ), 0);
+    const spanXY = Math.max(scene.maxX - scene.minX, scene.maxY - scene.minY, 1);
+
+    state.zScale = (() => {
+      if (!zTop) return 1;
+      const raw = 0.28 * spanXY / zTop;
+      return Math.min(8, Math.max(1, Math.round(raw * 2) / 2));
+    })();
+    const zScaleInput = document.getElementById("zScale");
+    const zScaleVal = document.getElementById("zScaleVal");
+    function syncZScaleLabel() {
+      zScaleVal.textContent = state.zScale === 1 ? "1×(真实)" : `${state.zScale}×`;
+    }
+    zScaleInput.value = state.zScale;
+    syncZScaleLabel();
+
+    const camera = {};
+    function resetCamera() {
+      camera.yaw = -0.5;
+      camera.pitch = 1.05;
+      camera.zoom = 1;
+      camera.tx = (scene.minX + scene.maxX) / 2;
+      camera.ty = (scene.minY + scene.maxY) / 2;
+      camera.tz = zTop * state.zScale / 2;
+      // 屏幕像素偏移：目标点默认投影在画布中心，平移/换支点时只挪这个偏移，避免视角跳变
+      camera.ox = 0;
+      camera.oy = 0;
+    }
+    resetCamera();
+
+    function focusGapCamera() {
+      const g = data.gaps[state.gap];
+      if (!g) return;
+      const b = state.gapScope === "floor" ? floorBounds(g.floor) : null;
+      const span = b ? Math.max(b.width,b.height) : gapSpan(g,state.gapScope === "detail");
+      camera.tx = wx(g.floor,b ? b.minX+b.width/2 : (g.x+g.px)/2);
+      camera.ty = wy(g.floor,b ? -b.minY-b.height/2 : (g.y+g.py)/2);
+      camera.tz = zOf(g.floor);
+      camera.ox = camera.oy = 0;
+      camera.zoom = sceneRadius()*1.5/span;
+    }
+    function chooseGapScope(scope) {
+      state.gapScope = scope;
+      planUserView = false;
+      if (state.view === "3d") focusGapCamera();
+      renderMap();
+    }
+    document.getElementById("gapContext").onclick = () => chooseGapScope("context");
+    document.getElementById("gapDetail").onclick = () => chooseGapScope("detail");
+    document.getElementById("fitFloor").onclick = () => {
+      if (state.gap >= 0) chooseGapScope("floor");
+      else if (state.view === "3d") {
+        resetCamera();
+        if (state.floor !== "ALL") {
+          const b = floorBounds(state.floor);
+          camera.tx=wx(state.floor,b.minX+b.width/2); camera.ty=wy(state.floor,-b.minY-b.height/2);
+          camera.tz=zOf(state.floor); camera.zoom=sceneRadius()*1.5/Math.max(b.width,b.height);
+        }
+        render3D();
+      } else {
+        renderPlan();
+        const b=floorBounds(state.floor);
+        planUserView=true;
+        setPlanBox([b.minX,b.minY,b.width,b.height]);
+      }
+    };
+    document.getElementById("zoomIn").onclick = () => state.view === "3d" ? zoom3D(1.5) : zoomPlan(1/1.5);
+    document.getElementById("zoomOut").onclick = () => state.view === "3d" ? zoom3D(1/1.5) : zoomPlan(1.5);
+
+    function sceneRadius() {
+      const dz = zTop * state.zScale;
+      return Math.max(Math.hypot(scene.maxX - scene.minX, scene.maxY - scene.minY, dz) / 2, 1);
+    }
+    function viewScale(width, height) {
+      return Math.min(width, height) * 0.42 / sceneRadius() * camera.zoom;
+    }
+    function makeProjector(width, height) {
+      const sy = Math.sin(camera.yaw);
+      const cy = Math.cos(camera.yaw);
+      const sp = Math.sin(camera.pitch);
+      const cp = Math.cos(camera.pitch);
+      const radius = sceneRadius();
+      const fl = radius * 4;
+      const scale = viewScale(width, height);
+      const cx = width / 2 + camera.ox;
+      const cyc = height / 2 + camera.oy;
+      return function project(x, y, z) {
+        const px = x - camera.tx;
+        const py = y - camera.ty;
+        const pz = z - camera.tz;
+        const x1 = px * cy - py * sy;
+        const y1 = px * sy + py * cy;
+        const depth = y1 * cp - pz * sp;
+        const w = fl / Math.max(fl + depth, radius * 0.2);
+        return { x: cx + x1 * scale * w, y: cyc - (y1 * sp + pz * cp) * scale * w, depth };
+      };
+    }
+    function floorAlpha(floor) {
+      if (state.floor === "ALL" || !floor) return 1;
+      return floor === state.floor ? 1 : 0.12;
+    }
+    function render3D() {
+      const dpr = window.devicePixelRatio || 1;
+      const width = canvas.clientWidth;
+      const height = canvas.clientHeight;
+      if (!width || !height) return;
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+      const project = makeProjector(width, height);
+      lastProjector = project;
+      const cable = data.cables[state.selected] || data.cables[0] || { path_edges: [], start: "", end: "" };
+      const prims = [];
+      const labels = [];
+      const eps = sceneRadius() * 0.004;
+
+      function addLine3d(ax, ay, az, bx, by, bz, style) {
+        const a = project(ax, ay, az);
+        const b = project(bx, by, bz);
+        prims.push({ kind: "line", a, b, depth: (a.depth + b.depth) / 2 + (style.bias || 0), style });
+      }
+      function addPoint3d(x, y, z, style) {
+        const p = project(x, y, z);
+        prims.push({ kind: "point", p, depth: p.depth + (style.bias || 0), style });
+      }
+      function addPoly3d(points, style) {
+        const projected = points.map(pt => project(pt[0], pt[1], pt[2]));
+        const depth = projected.reduce((sum, p) => sum + p.depth, 0) / projected.length + (style.bias || 0);
+        prims.push({ kind: "poly", points: projected, depth, style });
+      }
+      function addLabel3d(x, y, z, text, style) {
+        if (!state.showLabels || !text) return;
+        labels.push({ p: project(x, y, z), text, style });
+      }
+
+      // 楼层板（统一外框，叠成楼层盒子）
+      const padX = (scene.maxX - scene.minX) * 0.04 + 1;
+      const padY = (scene.maxY - scene.minY) * 0.04 + 1;
+      const x0 = scene.minX - padX;
+      const x1 = scene.maxX + padX;
+      const y0 = scene.minY - padY;
+      const y1 = scene.maxY + padY;
+      const plateCorners = floor => {
+        const z = zOf(floor);
+        return [[x0, y0, z], [x1, y0, z], [x1, y1, z], [x0, y1, z]];
+      };
+      data.floors.forEach((floor, fi) => {
+        const alpha = floorAlpha(floor);
+        addPoly3d(plateCorners(floor), {
+          fill: `rgba(120,144,134,${0.07 * alpha})`,
+          stroke: `rgba(125,140,132,${0.55 * alpha})`,
+          width: 1,
+          bias: eps * 4
+        });
+        // 楼层标签按层错开放在不同角，避免近俯视时叠在一起
+        const corner = plateCorners(floor)[fi % 2 === 0 ? 0 : 3];
+        addLabel3d(corner[0], corner[1], corner[2], floor, { size: 14, fill: "#5d6862", weight: 700, dx: 8, dy: -6 });
+      });
+      for (let i = 0; i + 1 < data.floors.length; i++) {
+        const lo = plateCorners(data.floors[i]);
+        const hi = plateCorners(data.floors[i + 1]);
+        for (let k = 0; k < 4; k++) {
+          addLine3d(lo[k][0], lo[k][1], lo[k][2], hi[k][0], hi[k][1], hi[k][2], {
+            stroke: "rgba(150,162,154,0.5)", width: 1, dash: [4, 4], bias: eps * 4
+          });
+        }
+      }
+
+      // 房间范围
+      data.rooms.forEach(room => {
+        const alpha = floorAlpha(room.floor);
+        const z = zOf(room.floor) - eps * 0.4;
+        const points = room.vertices.map(([x, y]) => [wx(room.floor, x), wy(room.floor, y), z]);
+        if (points.length < 3) return;
+        addPoly3d(points, {
+          fill: `rgba(63,125,140,${0.08 * alpha})`,
+          stroke: `rgba(63,125,140,${0.7 * alpha})`,
+          width: 1.4,
+          dash: [6, 4],
+          bias: eps * 2
+        });
+        const center = points.reduce((acc, p) => [acc[0] + p[0] / points.length, acc[1] + p[1] / points.length, z], [0, 0, z]);
+        addLabel3d(center[0], center[1], center[2], room.name, { size: 11, fill: "#3f7d8c", dx: 5, dy: -5 });
+      });
+
+      // 固定路径网
+      if (state.showNetwork) {
+        data.route_segments.forEach(seg => {
+          const alpha = floorAlpha(seg.floor);
+          const z = zOf(seg.floor);
+          addLine3d(wx(seg.floor, seg.ax), wy(seg.floor, seg.ay), z, wx(seg.floor, seg.bx), wy(seg.floor, seg.by), z, {
+            stroke: `rgba(122,132,125,${0.65 * alpha})`, width: 1.6
+          });
+        });
+      }
+
+      // 竖井：同名竖井跨楼层连成立柱
+      const shaftGroups = new Map();
+      data.shafts.forEach(shaft => {
+        if (!shaftGroups.has(shaft.base_id)) shaftGroups.set(shaft.base_id, []);
+        shaftGroups.get(shaft.base_id).push(shaft);
+      });
+      shaftGroups.forEach(group => {
+        group.sort((a, b) => (floorIndex.get(a.floor) ?? 99) - (floorIndex.get(b.floor) ?? 99));
+        group.forEach(shaft => addPoint3d(wx(shaft.floor, shaft.x), wy(shaft.floor, shaft.y), zOf(shaft.floor), {
+          r: 4, fill: `rgba(154,79,176,${0.95 * floorAlpha(shaft.floor)})`, bias: -eps
+        }));
+        for (let i = 0; i + 1 < group.length; i++) {
+          const a = group[i];
+          const b = group[i + 1];
+          addLine3d(wx(a.floor, a.x), wy(a.floor, a.y), zOf(a.floor), wx(b.floor, b.x), wy(b.floor, b.y), zOf(b.floor), {
+            stroke: "rgba(154,79,176,0.85)", width: 3.5, dash: [7, 5]
+          });
+        }
+        const top = group[group.length - 1];
+        addLabel3d(wx(top.floor, top.x), wy(top.floor, top.y), zOf(top.floor), top.base_id, { size: 12, fill: "#9a4fb0", dx: 8, dy: -8 });
+      });
+
+      // 柜子
+      data.cabinets.forEach(cab => {
+        const isEnd = state.gap < 0 && (cab.name === cable.start || cab.name === cable.end);
+        if (isEnd) {
+          addPoint3d(wx(cab.floor, cab.x), wy(cab.floor, cab.y), zOf(cab.floor), {
+            r: 5.5, fill: "#0b6f97", stroke: "#fff", strokeWidth: 1.5, bias: -eps * 2
+          });
+        } else {
+          addPoint3d(wx(cab.floor, cab.x), wy(cab.floor, cab.y), zOf(cab.floor), {
+            r: 2.4, fill: `rgba(105,117,111,${0.85 * floorAlpha(cab.floor)})`
+          });
+        }
+      });
+
+      // 全部电缆走向（重叠越多颜色越深）：按去重边表每段只画一次，透明度按经过条数叠加换算，
+      nearbyGapCabinets().forEach(cab=>addLabel3d(wx(cab.floor,cab.x),wy(cab.floor,cab.y),zOf(cab.floor),cab.name,{size:12,fill:"#17211d",dx:7,dy:-7}));
+      // 再按透明度档位合批——两万条电缆拖动旋转也不卡
+      if (state.showAllCables) {
+        const batches = new Map();
+        const own = new Set((cable.path || []).map(k => (k >= 0 ? k : ~k)));
+        edgeTable.forEach((edge, k) => {
+          const count = edgeUsage[k] - (own.has(k) && isOk(cable) ? 1 : 0);
+          if (count <= 0) return;
+          const isShaft = edge.kind === "shaft";
+          const unit = isShaft ? 0.3 : 0.16;
+          const stacked = 1 - Math.pow(1 - unit, count);
+          const alpha = Math.round(stacked * Math.max(floorAlpha(edge.from.floor), floorAlpha(edge.to.floor)) * 20) / 20;
+          if (alpha <= 0) return;
+          const stroke = `rgba(31,108,153,${alpha})`;
+          const key = stroke + (isShaft ? "|s" : "");
+          let batch = batches.get(key);
+          if (!batch) {
+            batch = { path: new Path2D(), stroke, width: isShaft ? 2.4 : 1.2, dash: isShaft ? [6, 4] : null, depthSum: 0, n: 0 };
+            batches.set(key, batch);
+          }
+          const a = project(wx(edge.from.floor, edge.from.x), wy(edge.from.floor, edge.from.y), zOf(edge.from.floor));
+          const b = project(wx(edge.to.floor, edge.to.x), wy(edge.to.floor, edge.to.y), zOf(edge.to.floor));
+          batch.path.moveTo(a.x, a.y);
+          batch.path.lineTo(b.x, b.y);
+          batch.depthSum += (a.depth + b.depth) / 2;
+          batch.n += 1;
+        });
+        batches.forEach(batch => prims.push({
+          kind: "batch",
+          path: batch.path,
+          depth: batch.depthSum / batch.n - eps,
+          style: { stroke: batch.stroke, width: batch.width, dash: batch.dash }
+        }));
+      }
+
+      // 当前选中电缆（白色衬底 + 按类型着色）
+      (state.gap >= 0 ? [] : cable.path_edges).forEach(edge => {
+        const fx = wx(edge.from.floor, edge.from.x);
+        const fy = wy(edge.from.floor, edge.from.y);
+        const fz = zOf(edge.from.floor);
+        const tx = wx(edge.to.floor, edge.to.x);
+        const ty = wy(edge.to.floor, edge.to.y);
+        const tz = zOf(edge.to.floor);
+        addLine3d(fx, fy, fz, tx, ty, tz, { stroke: "rgba(255,255,255,0.9)", width: 6.5, bias: -eps * 2 });
+        const stroke = edge.kind === "connector" ? "#c7791b" : edge.kind === "shaft" ? "#9a4fb0" : "#147d64";
+        addLine3d(fx, fy, fz, tx, ty, tz, {
+          stroke, width: 3.2, dash: edge.kind === "shaft" ? [8, 6] : null, bias: -eps * 3
+        });
+      });
+      if (state.gap < 0 && isOk(cable) && cable.path_edges.length) {
+        const first = cable.path_edges[0].from;
+        const last = cable.path_edges[cable.path_edges.length - 1].to;
+        addLabel3d(wx(first.floor, first.x), wy(first.floor, first.y), zOf(first.floor), "起点", { size: 13, fill: "#147d64", weight: 700, dx: 8, dy: -8 });
+        addLabel3d(wx(last.floor, last.x), wy(last.floor, last.y), zOf(last.floor), "终点", { size: 13, fill: "#c43f4a", weight: 700, dx: 8, dy: 16 });
+      }
+
+      prims.sort((a, b) => b.depth - a.depth);
+      prims.forEach(prim => {
+        if (prim.kind === "batch") {
+          ctx.strokeStyle = prim.style.stroke;
+          ctx.lineWidth = prim.style.width;
+          ctx.lineCap = "round";
+          ctx.setLineDash(prim.style.dash || []);
+          ctx.stroke(prim.path);
+          ctx.setLineDash([]);
+        } else if (prim.kind === "poly") {
+          ctx.beginPath();
+          prim.points.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+          ctx.closePath();
+          if (prim.style.fill) { ctx.fillStyle = prim.style.fill; ctx.fill(); }
+          if (prim.style.stroke) {
+            ctx.strokeStyle = prim.style.stroke;
+            ctx.lineWidth = prim.style.width || 1;
+            ctx.setLineDash(prim.style.dash || []);
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
+        } else if (prim.kind === "line") {
+          ctx.beginPath();
+          ctx.moveTo(prim.a.x, prim.a.y);
+          ctx.lineTo(prim.b.x, prim.b.y);
+          ctx.strokeStyle = prim.style.stroke;
+          ctx.lineWidth = prim.style.width;
+          ctx.lineCap = "round";
+          ctx.setLineDash(prim.style.dash || []);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        } else {
+          ctx.beginPath();
+          ctx.arc(prim.p.x, prim.p.y, prim.style.r, 0, Math.PI * 2);
+          ctx.fillStyle = prim.style.fill;
+          ctx.fill();
+          if (prim.style.stroke) {
+            ctx.strokeStyle = prim.style.stroke;
+            ctx.lineWidth = prim.style.strokeWidth || 1;
+            ctx.stroke();
+          }
+        }
+      });
+      const placed = [];
+      labels.forEach(item => {
+        const dx = item.style.dx || 0;
+        let dy = item.style.dy || 0;
+        const size = item.style.size;
+        ctx.font = `${item.style.weight || 400} ${size}px "Microsoft YaHei", sans-serif`;
+        const w = ctx.measureText(item.text).width;
+        // 简单标签避让：与已放置标签重叠时向下错开
+        for (let tries = 0; tries < 4; tries++) {
+          const lx = item.p.x + dx;
+          const ly = item.p.y + dy;
+          const hit = placed.some(b => lx < b.x + b.w && lx + w > b.x && ly - size < b.y && ly > b.y - b.h);
+          if (!hit) break;
+          dy += size + 3;
+        }
+        const lx = item.p.x + dx;
+        const ly = item.p.y + dy;
+        placed.push({ x: lx, y: ly, w, h: size });
+        ctx.strokeStyle = "rgba(255,255,255,0.9)";
+        ctx.lineWidth = 3;
+        ctx.strokeText(item.text, lx, ly);
+        ctx.fillStyle = item.style.fill || "#17211d";
+        ctx.fillText(item.text, lx, ly);
+      });
+      // 检查标记最后绘制：保持屏幕大小，不被楼层板遮住；坐标使用同一套楼层偏移与标高。
+      gapHits = [];
+      const visibleGaps = (state.showGaps ? data.gaps : []).map((g,index)=>({g,index})).filter(({g})=>floorVisible(g.floor));
+      visibleGaps.sort((a,b)=>(a.index===state.gap)-(b.index===state.gap));
+      visibleGaps.forEach(({g,index}) => {
+        const a=project(wx(g.floor,g.x),wy(g.floor,g.y),zOf(g.floor));
+        const b=project(wx(g.floor,g.px),wy(g.floor,g.py),zOf(g.floor));
+        const active=index===state.gap, r=active?17:12;
+        ctx.strokeStyle="#c43c32"; ctx.lineWidth=2; ctx.setLineDash([5,4]);
+        ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); ctx.setLineDash([]);
+        ctx.beginPath(); ctx.arc(a.x,a.y,r,0,Math.PI*2);
+        ctx.fillStyle=active?"#fff0e8bb":"#ffffff99"; ctx.fill(); ctx.lineWidth=active?3:2; ctx.stroke();
+        [a,b].forEach(p=>{ctx.beginPath();ctx.arc(p.x,p.y,2.5,0,Math.PI*2);ctx.fillStyle="#c43c32";ctx.fill();});
+        const label=active?`检查点 ${index+1} · ${g.floor || "未知楼层"} · ${gapDistance(g)}`:String(index+1);
+        ctx.font='bold 14px "Microsoft YaHei", sans-serif';ctx.lineWidth=3;ctx.strokeStyle="#fff";
+        ctx.strokeText(label,a.x+r+3,a.y-r);ctx.fillStyle="#c43c32";ctx.fillText(label,a.x+r+3,a.y-r);
+        gapHits.push({index,x:a.x,y:a.y,r:r+5});
+      });
+    }
+    let gapHits = [];
+    function pickGap(mx,my) {
+      let best=-1, distance=Infinity;
+      gapHits.forEach(hit=>{
+        const d=Math.hypot(mx-hit.x,my-hit.y);
+        if(d<=hit.r && d<distance){best=hit.index;distance=d;}
+      });
+      return best;
+    }
+
+    function distToSegment2d(px, py, a, b) {
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len2 = dx * dx + dy * dy;
+      let t = len2 > 0 ? ((px - a.x) * dx + (py - a.y) * dy) / len2 : 0;
+      t = Math.max(0, Math.min(1, t));
+      return Math.hypot(px - (a.x + t * dx), py - (a.y + t * dy));
+    }
+    function nearestOnSegment2d(px, py, a, b) {
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len2 = dx * dx + dy * dy;
+      let t = len2 > 0 ? ((px - a.x) * dx + (py - a.y) * dy) / len2 : 0;
+      t = Math.max(0, Math.min(1, t));
+      return { x: a.x + t * dx, y: a.y + t * dy, t, dist: Math.hypot(px - (a.x + t * dx), py - (a.y + t * dy)) };
+    }
+    // 点击拾取：找屏幕上离鼠标最近的一段（去重边表），多条电缆共用这段时，重复点击依次轮换
+    function pickCable(mx, my) {
+      if (!lastProjector || !state.showAllCables) return -1;
+      let bestEdge = -1;
+      let bestDist = 9;
+      edgeTable.forEach((edge, k) => {
+        if (!edgeUsage[k]) return;
+        const a = lastProjector(wx(edge.from.floor, edge.from.x), wy(edge.from.floor, edge.from.y), zOf(edge.from.floor));
+        const b = lastProjector(wx(edge.to.floor, edge.to.x), wy(edge.to.floor, edge.to.y), zOf(edge.to.floor));
+        const dist = distToSegment2d(mx, my, a, b);
+        if (dist < bestDist) { bestDist = dist; bestEdge = k; }
+      });
+      if (bestEdge < 0) return -1;
+      const candidates = edgeCables[bestEdge];
+      const at = candidates.indexOf(state.selected);
+      return at < 0 ? candidates[0] : candidates[(at + 1) % candidates.length];
+    }
+    function panBy(dxPx, dyPx) {
+      // 平移即纯屏幕偏移，任何视角下都精确跟手
+      camera.ox += dxPx;
+      camera.oy += dyPx;
+    }
+
+    function pickNearestPoint(mx, my, includeRoute) {
+      if (!lastProjector) return null;
+      let best = null;
+      let bestDist = 18;
+      data.cabinets.forEach(cab => {
+        if (!floorVisible(cab.floor)) return;
+        const p = lastProjector(wx(cab.floor, cab.x), wy(cab.floor, cab.y), zOf(cab.floor));
+        const dist = Math.hypot(mx - p.x, my - p.y);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = { type: "cabinet", name: cab.name, x: wx(cab.floor, cab.x), y: wy(cab.floor, cab.y), z: zOf(cab.floor), floor: cab.floor };
+        }
+      });
+      data.shafts.forEach(shaft => {
+        if (!floorVisible(shaft.floor)) return;
+        const p = lastProjector(wx(shaft.floor, shaft.x), wy(shaft.floor, shaft.y), zOf(shaft.floor));
+        const dist = Math.hypot(mx - p.x, my - p.y);
+        if (dist < bestDist) {
+          bestDist = dist;
+          best = { type: "shaft", name: shaft.base_id, x: wx(shaft.floor, shaft.x), y: wy(shaft.floor, shaft.y), z: zOf(shaft.floor), floor: shaft.floor };
+        }
+      });
+      // 未找到柜子/竖井时，按路径网的最近位置做支点（仅 mousedown 调用时启用）
+      if (!best && includeRoute) {
+        let routeBestDist = 28;
+        data.route_segments.forEach(seg => {
+          if (!floorVisible(seg.floor)) return;
+          const z = zOf(seg.floor);
+          const ax = wx(seg.floor, seg.ax);
+          const ay = wy(seg.floor, seg.ay);
+          const bx = wx(seg.floor, seg.bx);
+          const by = wy(seg.floor, seg.by);
+          const a = lastProjector(ax, ay, z);
+          const b = lastProjector(bx, by, z);
+          const near = nearestOnSegment2d(mx, my, a, b);
+          if (near.dist < routeBestDist) {
+            routeBestDist = near.dist;
+            best = { type: "route", x: ax + (bx - ax) * near.t, y: ay + (by - ay) * near.t, z };
+          }
+        });
+      }
+      return best;
+    }
+
+    function unprojectAtTargetDepth(mx, my) {
+      // 把画布像素点反投影到"目标点深度"所在平面上的世界坐标，作为空白处旋转的支点
+      const width = canvas.clientWidth;
+      const height = canvas.clientHeight;
+      if (!width || !height) return null;
+      const scale = viewScale(width, height);
+      const vx = (mx - width / 2 - camera.ox) / scale;
+      const vu = -(my - height / 2 - camera.oy) / scale;
+      const sy = Math.sin(camera.yaw);
+      const cy = Math.cos(camera.yaw);
+      const sp = Math.sin(camera.pitch);
+      const cp = Math.cos(camera.pitch);
+      return {
+        x: camera.tx + vx * cy + vu * sy * sp,
+        y: camera.ty - vx * sy + vu * cy * sp,
+        z: camera.tz + vu * cp
+      };
+    }
+    function setRotationTarget(point) {
+      if (!point || !lastProjector) return false;
+      // 换支点时用屏幕偏移把它钉回原屏幕位置：旋转绕支点进行且画面不跳（CAD 式环绕）
+      const before = lastProjector(point.x, point.y, point.z);
+      // 支点深度平面的透视因子在换支点后变为 1，用 zoom 同步补偿，支点邻域尺寸保持不变
+      const radius = sceneRadius();
+      camera.zoom *= (radius * 4) / Math.max(radius * 4 + before.depth, radius * 0.2);
+      camera.tx = point.x;
+      camera.ty = point.y;
+      camera.tz = point.z;
+      camera.ox = before.x - canvas.clientWidth / 2;
+      camera.oy = before.y - canvas.clientHeight / 2;
+      return true;
+    }
+    window.__cable3dDebug = {
+      camera: () => ({ yaw: camera.yaw, pitch: camera.pitch, zoom: camera.zoom, tx: camera.tx, ty: camera.ty, tz: camera.tz, ox: camera.ox, oy: camera.oy }),
+      pickNearestPoint: (mx, my, includeRoute) => pickNearestPoint(mx, my, includeRoute),
+      projectWorld: (x, y, z) => (lastProjector ? lastProjector(x, y, z) : null)
+    };
+
+    const tooltip3d = document.getElementById("tooltip3d");
+    function showTooltip(event, point) {
+      const rect = canvas.getBoundingClientRect();
+      if (!point) { tooltip3d.style.display = "none"; return; }
+      const label = point.type === "cabinet" ? point.name : `竖井：${point.name}${point.floor ? "（" + point.floor + "）" : ""}`;
+      tooltip3d.textContent = label;
+      tooltip3d.style.left = (event.clientX - rect.left) + "px";
+      tooltip3d.style.top = (event.clientY - rect.top) + "px";
+      tooltip3d.style.display = "block";
+    }
+    canvas.addEventListener("mousemove", event => {
+      if (drag) { tooltip3d.style.display = "none"; return; }
+      const rect = canvas.getBoundingClientRect();
+      const mx = event.clientX - rect.left;
+      const my = event.clientY - rect.top;
+      const point = pickNearestPoint(mx, my);
+      showTooltip(event, point);
+      const gapIndex=pickGap(mx,my);
+      if(gapIndex>=0) {
+        const g=data.gaps[gapIndex];
+        tooltip3d.textContent=`检查点 ${gapIndex+1} · ${g.floor} · 差 ${gapDistance(g)}，点击查看`;
+        tooltip3d.style.left=mx+"px";tooltip3d.style.top=my+"px";tooltip3d.style.display="block";
+      }
+    });
+    canvas.addEventListener("mouseleave", () => { tooltip3d.style.display = "none"; });
+
+    let drag = null;
+    let pickTimer = null;
+    let lastPick = null;
+    let suppressContextMenu = false;
+    canvas.addEventListener("mousedown", event => {
+      if (event.button !== 0 && event.button !== 1 && event.button !== 2) return;
+      event.preventDefault();
+      clearTimeout(pickTimer);
+      const rect = canvas.getBoundingClientRect();
+      const mx = event.clientX - rect.left;
+      const my = event.clientY - rect.top;
+      // CAD 习惯：中键拖动平移、Shift+中键旋转；同时保留左键旋转、右键/Shift+左键平移
+      const rotate = event.button === 1 ? event.shiftKey : (event.button === 0 && !event.shiftKey);
+      // 旋转支点：优先吸附鼠标下的柜子/竖井/路径点，空白处退回目标深度平面上的鼠标点，
+      // 支点会被钉在原屏幕位置，画面绕它环绕而不跳动；prevCam 供单击未拖动时恢复相机
+      const prevCam = rotate ? { ...camera } : null;
+      if (rotate) setRotationTarget(pickNearestPoint(mx, my, true) || unprojectAtTargetDepth(mx, my));
+      drag = { x: event.clientX, y: event.clientY, sx: event.clientX, sy: event.clientY, button: event.button, rotate, moved: false, prevCam };
+      canvas.classList.add("dragging");
+    });
+    window.addEventListener("mousemove", event => {
+      if (!drag) return;
+      const dx = event.clientX - drag.x;
+      const dy = event.clientY - drag.y;
+      // moved 按离按下点的累计位移判定，慢速拖动不会被误认成点击
+      if (Math.abs(event.clientX - drag.sx) + Math.abs(event.clientY - drag.sy) > 3) drag.moved = true;
+      drag.x = event.clientX;
+      drag.y = event.clientY;
+      if (drag.rotate) {
+        // 方向遵循“抓着物体转”：向右拖动，物体朝向观察者的一面向右转（CAD 手感）
+        camera.yaw += dx * 0.005;
+        camera.pitch = Math.min(1.55, Math.max(0.08, camera.pitch + dy * 0.005));
+      } else {
+        panBy(dx, dy);
+      }
+      render3D();
+    });
+    window.addEventListener("mouseup", event => {
+      if (!drag || event.button !== drag.button) return;
+      const wasDrag = drag.moved;
+      const button = drag.button;
+      // 单击（未拖动）不应移动相机：恢复按下时为选支点所做的调整
+      if (!wasDrag && drag.prevCam) {
+        Object.assign(camera, drag.prevCam);
+        render3D();
+      }
+      if (wasDrag && button === 2) suppressContextMenu = true;
+      drag = null;
+      canvas.classList.remove("dragging");
+      if (!wasDrag && button === 0 && state.view === "3d") {
+        const rect = canvas.getBoundingClientRect();
+        const mx = event.clientX - rect.left;
+        const my = event.clientY - rect.top;
+        clearTimeout(pickTimer);
+        // 延迟拾取，给 dblclick 留出取消窗口，避免双击复位时误切换选中
+        pickTimer = setTimeout(() => {
+          const gapIndex = pickGap(mx,my);
+          if (gapIndex >= 0) { focusGap(gapIndex); return; }
+          if (state.gap >= 0) return;
+          const index = pickCable(mx, my);
+          if (index >= 0 && index !== state.selected) {
+            lastPick = { prev: state.selected, at: performance.now() };
+            state.selected = index;
+            renderList();
+            renderDetail();
+            renderMap();
+          }
+        }, 250);
+      }
+    });
+    canvas.addEventListener("wheel", event => {
+      event.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      zoom3D(Math.exp(-wheelDeltaY(event)*0.0012),event.clientX-rect.left-rect.width/2,event.clientY-rect.top-rect.height/2);
+    }, { passive: false });
+    function zoom3D(factor, ax=0, ay=0) {
+      const oldZoom = camera.zoom;
+      const next = oldZoom * factor;
+      const maxZoom = Math.max(50,sceneRadius()/(Number(params["CAD每米单位"] || 1000)*0.01));
+      // 上下限 [0.2, 50]；支点透视补偿可能让 zoom 已在界外，此时不反向夹取以免跳变
+      camera.zoom = next > oldZoom
+        ? Math.min(next, Math.max(maxZoom, oldZoom))
+        : Math.max(next, Math.min(0.02, oldZoom));
+      const f = camera.zoom / oldZoom;
+      // 以鼠标位置为缩放锚点：内容绕目标点缩放，屏幕偏移按同比例收缩把指针下的内容留在原处
+      camera.ox = ax - (ax - camera.ox) * f;
+      camera.oy = ay - (ay - camera.oy) * f;
+      render3D();
+    }
+    canvas.addEventListener("dblclick", () => {
+      clearTimeout(pickTimer);
+      // 慢双击时首击的延迟拾取可能已换选电缆：双击只应复位视角，把选中回滚
+      if (lastPick && performance.now() - lastPick.at < 500) {
+        state.selected = lastPick.prev;
+        renderList();
+        renderDetail();
+      }
+      lastPick = null;
+      resetCamera();
+      render3D();
+    });
+    canvas.addEventListener("contextmenu", event => event.preventDefault());
+    window.addEventListener("contextmenu", event => {
+      // 右键平移拖出画布后松开时，抑制落在其他元素上的原生右键菜单
+      if (suppressContextMenu) {
+        suppressContextMenu = false;
+        event.preventDefault();
+      }
+    });
+
+    zScaleInput.addEventListener("input", event => {
+      const next = Number(event.target.value) || 1;
+      // 目标点高度按比例跟随层间距变化（支点 z = 标高×zScale 同比缩放），不硬重置到中层
+      camera.tz *= next / (state.zScale || 1);
+      state.zScale = next;
+      syncZScaleLabel();
+      renderMap();
+    });
+    document.getElementById("resetView").addEventListener("click", () => { resetCamera(); render3D(); });
+
+    function setView(view) {
+      tooltip3d.style.display = "none";
+      document.getElementById("gapInfo").style.display = state.gap < 0 ? "none" : "block";
+      document.getElementById("detail").style.display = state.gap < 0 ? "" : "none";
+      if (view === "3d" && state.view !== "3d" && state.gap >= 0) focusGapCamera();
+      state.view = view;
+      stage.dataset.view = view === "3d" ? "3d" : "plan";
+      document.getElementById("viewPlan").className = view === "3d" ? "" : "active";
+      document.getElementById("view3d").className = view === "3d" ? "active" : "";
+      history.replaceState(null, "", view === "3d" ? "#3d" : location.pathname.split("/").pop() + location.search);
+      renderMap();
+    }
+    document.getElementById("viewPlan").addEventListener("click", () => setView("plan"));
+    document.getElementById("view3d").addEventListener("click", () => setView("3d"));
+
+    function renderMap() {
+      if (state.view === "3d") render3D();
+      else renderPlan();
+    }
+
+    function edgeName(edge) {
+      if (edge.kind === "connector") return `接入：${edge.name || ""}`;
+      if (edge.kind === "shaft") return `竖井：${edge.shaft_id || ""}`;
+      return `路径：${edge.route_id || ""}${edge.section_no ? ":" + edge.section_no : ""}`;
+    }
+    // 连续走在同一条 CAD 线上的几段合成一步，附累计长度，便于对照图纸复核
+    function pathSteps(cable) {
+      const steps = [];
+      cable.path_edges.forEach(edge => {
+        const name = edgeName(edge);
+        const last = steps[steps.length - 1];
+        const length = Number(edge.length_m) || 0;
+        if (last && last.name === name && edge.kind === "route") {
+          last.length += length;
+        } else {
+          steps.push({ name, length, floor: edge.floor || "" });
+        }
+      });
+      let total = 0;
+      steps.forEach(step => { total += step.length; step.total = total; });
+      return steps;
+    }
+    function formulaText(cable) {
+      if (!isOk(cable) || typeof cable.base_length !== "number") return "";
+      const base = cable.base_length.toFixed(2);
+      const add = Number(params["不拐弯修正"]);
+      const k = Number(params["拐弯倍率"]);
+      const room = cable.crosses_room ? ` + ${Number(params["跨房间修正"])}` : "";
+      if (cable.rule_kind === "不拐弯") return `${base} + ${add}${room} ≈ ${cable.auto_length} m`;
+      if (cable.rule_kind === "拐弯/跨楼层") return `(${base} + ${add}) × ${k}${room} ≈ ${cable.auto_length} m`;
+      return "";
+    }
+    function copyText(text, button) {
+      const done = () => { if (button) { const old = button.textContent; button.textContent = "已复制"; setTimeout(() => { button.textContent = old; }, 1200); } };
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(done, () => fallbackCopy(text, done));
+      } else {
+        fallbackCopy(text, done);
+      }
+    }
+    function fallbackCopy(text, done) {
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      try { document.execCommand("copy"); done(); } catch (err) { /* 浏览器不允许时静默 */ }
+      area.remove();
+    }
+    function renderDetail() {
+      const root = document.getElementById("detail");
+      const cable = data.cables[state.selected] || data.cables[0];
+      if (!cable) {
+        root.innerHTML = '<div class="empty">暂无数据</div>';
+        return;
+      }
+      const issueClass = isOk(cable) ? "" : " issue";
+      const steps = pathSteps(cable).map((step, index) => `
+        <tr>
+          <td>${index + 1}</td>
+          <td>${esc(step.name)}</td>
+          <td>${step.length.toFixed(2)}m</td>
+          <td>${step.total.toFixed(2)}m</td>
+          <td>${esc(step.floor)}</td>
+        </tr>
+      `).join("");
+      const formula = formulaText(cable);
+      const alert = isAlert(cable);
+      root.innerHTML = `
+        <h2>${esc(cable.cable_id || `行 ${cable.row_no}`)}</h2>
+        <div class="sub">${esc(cable.start)} → ${esc(cable.end)}<br>清册第 ${esc(cable.row_no)} 行${cable.model ? ` · ${esc(cable.model)}` : ""}</div>
+        <div class="stat-grid">
+          <div class="stat"><span>自动统计</span><b>${fmt(cable.auto_length, "m")}</b></div>
+          <div class="stat"><span>向上取整</span><b>${fmt(cable.ceil_length, "m")}</b></div>
+          <div class="stat"><span>手工长度</span><b>${cable.manual_length === "" || cable.manual_length === null ? "—" : esc(cable.manual_length) + "m"}</b></div>
+          <div class="stat"${alert ? ' style="border-color:var(--warn);background:#fff8ec"' : ""}><span>差值（自动−手工）</span><b>${typeof cable.diff === "number" ? esc(signed(cable.diff)) + "m" : "—"}</b></div>
+          <div class="stat"><span>基础路径</span><b>${fmt(cable.base_length, "m")}</b></div>
+          <div class="stat"><span>修正量</span><b>${fmt(cable.extra, "m")}</b></div>
+          <div class="stat"><span>起点房间</span><b>${esc(cable.start_room || "室外")}</b></div>
+          <div class="stat"><span>终点房间</span><b>${esc(cable.end_room || "室外")}</b></div>
+        </div>
+        <div class="rule${issueClass}">${esc(isOk(cable) ? cable.rule || "已计算" : cable.status)}${formula ? `<br><span style="color:var(--muted)">${esc(formula)}</span>` : ""}</div>
+        <div class="rule">${esc(cable.description || "无路径说明")}${cable.description ? '<button type="button" class="copy-btn" id="copyPath">复制</button>' : ""}</div>
+        <table>
+          <thead><tr><th>#</th><th>路径步骤</th><th>长度</th><th>累计</th><th>楼层</th></tr></thead>
+          <tbody>${steps || '<tr><td colspan="5">无可展示路径</td></tr>'}</tbody>
+        </table>
+      `;
+      const copyButton = document.getElementById("copyPath");
+      if (copyButton) copyButton.addEventListener("click", () => copyText(`${cable.cable_id}\t${cable.start} → ${cable.end}\t${cable.auto_length} m\t${cable.description}`, copyButton));
+    }
+
+    // ---------- 导出图片 ----------
+    function download(blob, name) {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+    function exportName(suffix) {
+      const cable = data.cables[state.selected];
+      const safe = text => String(text || "").replace(/[\\/:*?"<>|\s]+/g, "_");
+      return `${safe(data.title || "路径可视化")}_${safe(cable ? cable.cable_id : "")}_${suffix}.png`;
+    }
+    function exportImage() {
+      if (state.view === "3d") {
+        const out = document.createElement("canvas");
+        out.width = canvas.width;
+        out.height = canvas.height;
+        const octx = out.getContext("2d");
+        octx.fillStyle = "#ffffff";
+        octx.fillRect(0, 0, out.width, out.height);
+        octx.drawImage(canvas, 0, 0);
+        out.toBlob(blob => blob && download(blob, exportName("三维")), "image/png");
+        return;
+      }
+      // SVG 里用了 CSS 变量，单独渲染成图片前换成实际颜色
+      const rootStyle = getComputedStyle(document.documentElement);
+      const width = svg.clientWidth;
+      const height = svg.clientHeight;
+      let markup = new XMLSerializer().serializeToString(svg).replace(/var\(--([a-z]+)\)/g, (_, name) => rootStyle.getPropertyValue(`--${name}`).trim() || "#000");
+      markup = markup.replace("<svg", `<svg width="${width}" height="${height}"`);
+      const image = new Image();
+      image.onload = () => {
+        const scale = 2;
+        const out = document.createElement("canvas");
+        out.width = width * scale;
+        out.height = height * scale;
+        const octx = out.getContext("2d");
+        octx.fillStyle = "#ffffff";
+        octx.fillRect(0, 0, out.width, out.height);
+        octx.drawImage(image, 0, 0, out.width, out.height);
+        out.toBlob(blob => blob && download(blob, exportName(state.floor === "ALL" ? "平面" : state.floor)), "image/png");
+      };
+      image.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(markup);
+    }
+    document.getElementById("exportImage").addEventListener("click", exportImage);
+
+    renderFloorTabs();
+    renderList();
+    renderDetail();
+    setView(state.view);
+    // 平面视图靠 viewBox 自动适配窗口变化，重绘只会重置用户视口；只有 3D 需要按新尺寸重投影
+    window.addEventListener("resize", () => {
+      if (state.view === "3d") render3D();
+      else updateGapMarkers();
+    });
+    window.__cableViewerReady = true;
+  </script>
+</body>
+</html>
