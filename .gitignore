@@ -29,3 +29,13 @@ ErrorReports/
 # VS Code / IDE
 .vscode/
 .idea/
+
+# Local Python environments and terminal/CAD session artifacts
+.venv/
+venv/
+*.lnk
+*.tmp
+*.claimed
+# Per-project terminal input/settings remain local business data.
+项目/*/data/terminal/
+项目/*/outputs/端子排/

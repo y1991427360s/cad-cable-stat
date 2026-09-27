@@ -1,0 +1,6 @@
+# V1 已验证的运行依赖（Python 3.14）
+openpyxl==3.1.5
+ezdxf==1.4.3
+
+# 仅重新构建 EXE 时需要；普通用户直接使用 EXE。
+pyinstaller==6.21.0

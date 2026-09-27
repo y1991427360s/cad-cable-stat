@@ -11,11 +11,11 @@ $ErrorActionPreference = "Stop"
 $toolRoot = $PSScriptRoot
 $buildRoot = Join-Path $toolRoot "_build_release"
 $distRoot = Join-Path $buildRoot "dist"
-$stagedExe = Join-Path $distRoot "电缆统计.exe"
-$releaseExe = Join-Path $toolRoot "电缆统计.exe"
+$stagedExe = Join-Path $distRoot "电气二次设计工作台.exe"
+$releaseExe = Join-Path $toolRoot "电气二次设计工作台.exe"
 $stamp = Get-Date -Format "yyyyMMdd_HHmmss_fff"
 $smokeProject = Join-Path $buildRoot "smoke_$stamp"
-$publishTemp = Join-Path $toolRoot "电缆统计.release-$PID.tmp"
+$publishTemp = Join-Path $toolRoot "电气二次设计工作台.release-$PID.tmp"
 
 function Invoke-CheckedPython {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
@@ -28,8 +28,8 @@ function Invoke-CheckedPython {
 Push-Location -LiteralPath $toolRoot
 try {
     # 只使用已安装的运行时；缺依赖时停止，不在构建脚本中安装或升级依赖。
-    Invoke-CheckedPython -Arguments @("-c", "import sys, openpyxl, PyInstaller; assert sys.version_info[:2] == (3, 14), 'Build requires Python 3.14'; print('Python:', sys.executable); print('PyInstaller:', PyInstaller.__version__)")
-    foreach ($relative in @("app_icon.ico", "cad_cable_wizard.lsp", "项目模板", "cable_stat/visualizer.html", "cable_stat_app.py", "cable_stat_gui.py")) {
+    Invoke-CheckedPython -Arguments @("-c", "import sys, openpyxl, ezdxf, PyInstaller; assert sys.version_info[:2] == (3, 14), 'Build requires Python 3.14'; print('Python:', sys.executable); print('PyInstaller:', PyInstaller.__version__)")
+    foreach ($relative in @("app_icon.ico", "cad_cable_wizard.lsp", "项目模板", "cable_stat/visualizer.html", "app.py", "cable_stat_app.py", "cable_stat_gui.py", "modules/terminal/service.py", "tools/workbench_smoke.py")) {
         if (-not (Test-Path -LiteralPath (Join-Path $toolRoot $relative))) {
             throw "缺少打包资源：$relative"
         }
@@ -37,132 +37,41 @@ try {
 
     Write-Host "检查 Python 语法…"
     $sources = @(Get-ChildItem -LiteralPath $toolRoot -Filter "*.py" -File | ForEach-Object FullName)
-    $sources += @(Get-ChildItem -LiteralPath (Join-Path $toolRoot "cable_stat") -Filter "*.py" -File -Recurse | ForEach-Object FullName)
+    foreach ($package in @("cable_stat", "core", "modules", "ui", "tests", "tools")) {
+        $packagePath = Join-Path $toolRoot $package
+        if (Test-Path -LiteralPath $packagePath -PathType Container) {
+            $sources += @(Get-ChildItem -LiteralPath $packagePath -Filter "*.py" -File -Recurse | ForEach-Object FullName)
+        }
+    }
     Invoke-CheckedPython -Arguments (@("-m", "py_compile") + $sources)
+    Write-Host "检查端子模块及统一入口导入…"
+    Invoke-CheckedPython -Arguments @("-c", "import app; from modules.terminal.service import TerminalService; from tools.workbench_smoke import run_terminal_smoke; print('Workbench imports: OK')")
     if ($SkipTests) {
         Write-Warning "已显式指定 -SkipTests：跳过测试集；语法检查与打包后的冒烟验收仍会执行。"
     }
     else {
         Write-Host "运行核心计算测试…"
         Invoke-CheckedPython -Arguments @("-m", "test_calculate_cable_lengths")
-        Write-Host "运行独立回归与 GUI 测试…"
+        Write-Host "运行两模块独立回归、工程存储与 GUI 测试…"
         Invoke-CheckedPython -Arguments @("-m", "unittest", "discover", "-v")
     }
 
     New-Item -ItemType Directory -Path $buildRoot -Force | Out-Null
-    $fixtureScript = Join-Path $buildRoot "smoke_fixture.py"
-    # 冒烟工程与用户工程完全分开；测试两条电缆的直线路径、拐弯路径和别名映射。
-    $fixtureCode = @'
-from __future__ import annotations
-
-import csv
-import hashlib
-import json
-import math
-import sys
-from pathlib import Path
-
-from openpyxl import Workbook, load_workbook
-
-
-def require(condition, message):
-    if not condition:
-        raise RuntimeError(message)
-
-
-def write_csv(path, headers, rows):
-    with path.open("w", encoding="utf-8-sig", newline="") as stream:
-        writer = csv.writer(stream)
-        writer.writerow(headers)
-        writer.writerows(rows)
-
-
-mode, project_arg = sys.argv[1:3]
-project = Path(project_arg)
-workbook_path = project / "自动统计.xlsx"
-expected = {"SMOKE-直线": 17.0, "SMOKE-拐弯": 32.4}
-if mode == "prepare":
-    project.mkdir(parents=True, exist_ok=False)
-    data = project / "data"
-    data.mkdir()
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "电缆清册"
-    sheet.append(["电缆编号", "起点", "终点", "电缆长度", "型号"])
-    sheet.append(["SMOKE-直线", "甲柜清册名", "乙柜", 17, "测试型号"])
-    sheet.append(["SMOKE-拐弯", "甲柜", "丙柜", 32.4, "测试型号"])
-    workbook.save(workbook_path)
-    workbook.close()
-    write_csv(data / "柜子坐标.csv", ["柜子名称", "楼层", "X", "Y", "图层", "对象类型", "句柄"], [
-        ["甲柜", "1F", 0, 0, "CABLE_CAB_1F", "TEXT", "A"],
-        ["乙柜", "1F", 10000, 0, "CABLE_CAB_1F", "TEXT", "B"],
-        ["丙柜", "1F", 10000, 10000, "CABLE_CAB_1F", "TEXT", "C"],
-    ])
-    write_csv(data / "路径线段.csv", ["路径编号", "楼层", "起点X", "起点Y", "终点X", "终点Y", "长度_CAD单位", "图层", "句柄", "段号"], [
-        ["R1", "1F", 0, 0, 10000, 0, 10000, "CABLE_ROUTE_1F", "10", "1"],
-        ["R2", "1F", 10000, 0, 10000, 10000, 10000, "CABLE_ROUTE_1F", "11", "1"],
-    ])
-    write_csv(data / "参数.csv", ["参数", "值", "备注"], [
-        ["CAD每米单位", 1000, "合成毫米图"], ["不拐弯修正", 7, "合成测试"],
-        ["拐弯倍率", 1.2, "合成测试"], ["吸附容差", 0.05, "合成测试"],
-    ])
-    write_csv(data / "柜名别名.csv", ["清册名称", "CAD名称", "备注"], [["甲柜清册名", "甲柜", "冒烟别名"]])
-    (project / "source.sha256").write_text(hashlib.sha256(workbook_path.read_bytes()).hexdigest(), encoding="ascii")
-    print(f"Smoke project: {project}")
-elif mode == "verify":
-    from PyInstaller.archive.readers import CArchiveReader
-
-    archive = CArchiveReader(sys.argv[3])
-    source_root = Path(sys.argv[4])
-    archive_names = {name.replace("\\", "/"): name for name in archive.toc}
-    embedded = ["app_icon.ico", "cad_cable_wizard.lsp", "cable_stat/visualizer.html"]
-    embedded += [path.relative_to(source_root).as_posix() for path in (source_root / "项目模板").rglob("*") if path.is_file()]
-    for name in embedded:
-        require(name in archive_names, f"Missing packaged resource: {name}")
-        require(archive.extract(archive_names[name]) == (source_root / name).read_bytes(), f"Stale packaged resource: {name}")
-    log = (project / "电缆统计_自检.log").read_text(encoding="utf-8")
-    require("自检通过" in log and "自检失败" not in log, "Executable smoke log did not report success")
-    require(hashlib.sha256(workbook_path.read_bytes()).hexdigest() == (project / "source.sha256").read_text(encoding="ascii"), "Original workbook changed")
-    outputs = project / "outputs"
-    with (outputs / "统计明细.csv").open(encoding="utf-8-sig", newline="") as stream:
-        rows = list(csv.DictReader(stream))
-    require(len(rows) == len(expected), "Unexpected cable count in detail CSV")
-    require({row["电缆编号"] for row in rows} == set(expected), "Unexpected cable IDs")
-    for row in rows:
-        require(row["状态"] == "OK", f"Cable calculation failed: {row}")
-        require(math.isclose(float(row["自动统计"]), expected[row["电缆编号"]], abs_tol=1e-8), f"Wrong cable length: {row}")
-    workbook = load_workbook(outputs / "自动统计_计算结果.xlsx", data_only=True)
-    try:
-        require({"统计明细", "柜子清单", "参数", "问题清单"}.issubset(workbook.sheetnames), "Missing output workbook sheets")
-        sheet = workbook["电缆清册"]
-        headers = {cell.value: cell.column for cell in sheet[1]}
-        for row_no in (2, 3):
-            cable_id = sheet.cell(row_no, headers["电缆编号"]).value
-            require(sheet.cell(row_no, headers["自动统计"]).value == expected[cable_id], "Workbook length mismatch")
-    finally:
-        workbook.close()
-    visual = json.loads((outputs / "路径可视化数据.json").read_text(encoding="utf-8"))
-    require(len(visual["cables"]) == len(expected), "Visualization cable count mismatch")
-    html = (outputs / "路径可视化.html").read_text(encoding="utf-8")
-    require("__VISUAL_DATA_JSON__" not in html and "SMOKE-" in html, "Visualization data was not embedded")
-    print("Smoke validation passed: embedded resources, 2 cable lengths, workbook, CSV, HTML, JSON, and unchanged source.")
-else:
-    raise ValueError(f"Unknown fixture mode: {mode}")
-'@
-    [System.IO.File]::WriteAllText($fixtureScript, $fixtureCode, [System.Text.UTF8Encoding]::new($false))
-    Invoke-CheckedPython -Arguments @($fixtureScript, "prepare", $smokeProject)
+    # 合成工程与用户工程完全分开，保留电缆基线并新增端子完整图/仅接线图验收。
+    Invoke-CheckedPython -Arguments @("-m", "tools.workbench_smoke", "prepare", $smokeProject)
 
     Write-Host "打包暂存版 exe…"
     $buildArguments = @(
         "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--noconsole",
-        "--name", "电缆统计", "--icon", (Join-Path $toolRoot "app_icon.ico"),
+        "--name", "电气二次设计工作台", "--icon", (Join-Path $toolRoot "app_icon.ico"),
         "--distpath", $distRoot, "--workpath", (Join-Path $buildRoot "work"),
         "--specpath", (Join-Path $buildRoot "spec"),
         "--add-data", ((Join-Path $toolRoot "app_icon.ico") + ";."),
         "--add-data", ((Join-Path $toolRoot "cad_cable_wizard.lsp") + ";."),
         "--add-data", ((Join-Path $toolRoot "项目模板") + ";项目模板"),
         "--add-data", ((Join-Path $toolRoot "cable_stat/visualizer.html") + ";cable_stat"),
-        (Join-Path $toolRoot "cable_stat_app.py")
+        "--collect-all", "ezdxf", "--collect-all", "openpyxl",
+        (Join-Path $toolRoot "app.py")
     )
     Invoke-CheckedPython -Arguments $buildArguments
     if (-not (Test-Path -LiteralPath $stagedExe -PathType Leaf)) {
@@ -190,14 +99,14 @@ else:
     finally {
         [Environment]::SetEnvironmentVariable("CABLE_STAT_SMOKETEST", $previousSmoke, "Process")
     }
-    Invoke-CheckedPython -Arguments @($fixtureScript, "verify", $smokeProject, $stagedExe, $toolRoot)
+    Invoke-CheckedPython -Arguments @("-m", "tools.workbench_smoke", "verify", $smokeProject, $stagedExe, $toolRoot)
 
     # 先备份旧版，再在同一卷上原子替换；构建/测试失败不会提前覆盖用户正在用的版本。
     $backupPath = $null
     if (Test-Path -LiteralPath $releaseExe -PathType Leaf) {
         $backupRoot = Join-Path $buildRoot "backups"
         New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
-        $backupPath = Join-Path $backupRoot "电缆统计_$stamp.exe"
+        $backupPath = Join-Path $backupRoot "电气二次设计工作台_$stamp.exe"
         Copy-Item -LiteralPath $releaseExe -Destination $backupPath
     }
     Copy-Item -LiteralPath $stagedExe -Destination $publishTemp -Force

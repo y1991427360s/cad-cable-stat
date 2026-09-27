@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import gc
 import queue
+import re
 import threading
 import time
 import traceback
@@ -27,6 +29,9 @@ from cable_stat.project import (
 )
 from cable_stat.report import classify_issues, make_cabinet_check_rows, suggest_cabinet_names
 from cable_stat.text import normalize_cabinet_name, parse_float
+from core.models import UnifiedIssue
+from modules.terminal.page import TerminalPage
+from ui.workbench_pages import WorkbenchPages
 
 BG = "#f3f6fa"
 INK = "#152c45"
@@ -106,7 +111,7 @@ def validate_parameter_values(raw: dict[str, str]) -> dict[str, float]:
     return values
 
 
-class CableStatApp:
+class CableStatApp(WorkbenchPages):
     def __init__(self, root: tk.Tk, project: Path | None = None, *, auto_run: bool = False) -> None:
         self.root = root
         self.cfg = app.load_config()
@@ -123,6 +128,9 @@ class CableStatApp:
         self.param_baseline: dict[str, str] = {}
         self.pending_aliases: dict[str, str] = {}
         self.issues: list[tuple[str, str]] = []
+        self.terminal_issues: list[UnifiedIssue] = []
+        self.display_issues: list[UnifiedIssue] = []
+        self.output_paths: dict[str, Path] = {}
         self.cabinet_rows: list[dict[str, Any]] = []
         self.cad_names: list[str] = []
         self.signature: tuple = ()
@@ -133,8 +141,8 @@ class CableStatApp:
         self._build()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.bind("<Control-o>", lambda _e: self.choose_project())
-        root.bind("<F5>", lambda _e: self.refresh())
-        root.bind("<Control-Return>", lambda _e: self.start_calculation())
+        root.bind("<F5>", self._shortcut_inspect)
+        root.bind("<Control-Return>", self._shortcut_build)
         self._later(60, self._pump)
         self._later(800, self._poll_handoff)
         self._later(4000, self._poll_inputs)
@@ -155,7 +163,7 @@ class CableStatApp:
         self._timer_ids.add(timer)
 
     def _style(self) -> None:
-        self.root.title(f"{app.APP_TITLE} · {__version__}")
+        self.root.title(app.APP_TITLE)
         self.root.configure(bg=BG)
         scale = max(1.0, self.root.winfo_fpixels("1i") / 96)
         self.scale = scale
@@ -163,6 +171,13 @@ class CableStatApp:
         height = min(round(820 * scale), self.root.winfo_screenheight() - 100)
         self.root.geometry(f"{width}x{height}")
         self.root.minsize(min(width, round(940 * scale)), min(height, round(640 * scale)))
+        saved_size = self.cfg.get("window_geometry", "")
+        if isinstance(saved_size, str) and (match := re.match(r"^(\d+)x(\d+)", saved_size)):
+            restored_width = max(min(width, round(940 * scale)), min(int(match[1]), self.root.winfo_screenwidth() - 40))
+            restored_height = max(min(height, round(640 * scale)), min(int(match[2]), self.root.winfo_screenheight() - 80))
+            self.root.geometry(f"{restored_width}x{restored_height}")
+        if self.cfg.get("window_maximized") is True:
+            self.root.state("zoomed")
         for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont"):
             tkfont.nametofont(name).configure(family="Microsoft YaHei UI", size=10)
         try:
@@ -186,6 +201,8 @@ class CableStatApp:
         style.configure("TEntry", padding=6, fieldbackground="white")
         style.configure("TCombobox", padding=5, fieldbackground="white")
         style.configure("TNotebook", background=BG, borderwidth=0)
+        style.layout("Workbench.TNotebook", [("Notebook.client", {"sticky": "nswe"})])
+        style.layout("Workbench.TNotebook.Tab", [])
         style.configure("TNotebook.Tab", padding=(18, 10), background="#e6edf4")
         style.map("TNotebook.Tab", background=[("selected", "white")], foreground=[("selected", ACCENT)])
         style.configure("Treeview", background="white", fieldbackground="white", rowheight=round(33 * scale), borderwidth=0)
@@ -200,40 +217,61 @@ class CableStatApp:
         return button
 
     def _build(self) -> None:
-        sidebar = tk.Frame(self.root, bg=SIDEBAR, width=round(230 * self.scale), padx=18, pady=24)
+        sidebar = tk.Frame(self.root, bg=SIDEBAR, width=round(218 * self.scale), padx=16, pady=16)
         sidebar.pack(side="left", fill="y")
         sidebar.pack_propagate(False)
-        tk.Label(sidebar, text="电缆统计", fg="white", bg=SIDEBAR, font=("Microsoft YaHei UI", 22, "bold")).pack(anchor="w")
-        tk.Label(sidebar, text="工程计算工作台", fg="#9eb9cf", bg=SIDEBAR).pack(anchor="w", pady=(6, 28))
-        for text, command in (("打开工程   Ctrl+O", self.choose_project), ("新建工程", self.new_project), ("导出 CAD 向导", self.export_cad)):
+        tk.Label(sidebar, text="电气二次设计", fg="white", bg=SIDEBAR, font=("Microsoft YaHei UI", 17, "bold")).pack(anchor="w")
+        tk.Label(sidebar, text="工作台  /  V1", fg="#9eb9cf", bg=SIDEBAR).pack(anchor="w", pady=(3, 12))
+        for text, command in (("打开工程   Ctrl+O", self.choose_project), ("新建工程", self.new_project)):
             self._button(sidebar, text, command, mutate=True).pack(fill="x", pady=4)
-        tk.Label(sidebar, text="最近工程", fg="#9eb9cf", bg=SIDEBAR).pack(anchor="w", pady=(28, 10))
+        self.nav_buttons: dict[str, tk.Button] = {}
+        groups = (("工程", (("工程概览", "工程概览"),)),
+                  ("电缆设计", (("电缆长度统计", "计算参数"), ("柜名匹配", "柜名匹配"), ("路径复核", "路径复核"))),
+                  ("端子设计", (("端子排出图", "端子排出图"),)),
+                  ("CAD 工具", (("数据导出", "数据导出"),)),
+                  ("成果", (("问题清单", "问题清单"), ("输出文件", "输出文件"), ("运行日志", "运行日志"))))
+        for group, pages in groups:
+            tk.Label(sidebar, text=group, fg="#9eb9cf", bg=SIDEBAR, font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(10, 2))
+            for label, key in pages:
+                button = tk.Button(sidebar, text=label, command=lambda name=key: self.show_page(name), anchor="w",
+                                   bg=SIDEBAR, fg="white", activebackground="#305776", activeforeground="white",
+                                   relief="flat", borderwidth=0, padx=12, pady=3, cursor="hand2")
+                button.pack(fill="x")
+                self.nav_buttons[key] = button
+        tk.Label(sidebar, text="最近工程", fg="#9eb9cf", bg=SIDEBAR).pack(anchor="w", pady=(12, 4))
         self.history_list = tk.Listbox(sidebar, bg=SIDEBAR, fg="#edf5fa", selectbackground="#305776", selectforeground="white",
-                                       activestyle="none", borderwidth=0, highlightthickness=0, exportselection=False, height=12)
+                                       activestyle="none", borderwidth=0, highlightthickness=0, exportselection=False, height=3)
         self.history_list.pack(fill="both", expand=True)
         self.history_list.bind("<<ListboxSelect>>", self._history_selected)
         self._update_history()
-        tk.Label(sidebar, text=f"v{__version__}\nCAD → 清册 → 统计结果", fg="#9eb9cf", bg=SIDEBAR, justify="left").pack(anchor="w", pady=(20, 0))
+        tk.Label(sidebar, text="工程数据随文件夹保存", fg="#9eb9cf", bg=SIDEBAR, justify="left", font=("Microsoft YaHei UI", 8)).pack(anchor="w", pady=(8, 0))
 
-        main = ttk.Frame(self.root, padding=(24, 20))
+        main = ttk.Frame(self.root, padding=(18, 16))
         main.pack(side="left", fill="both", expand=True)
         header = ttk.Frame(main)
         header.pack(fill="x")
         titles = ttk.Frame(header)
         titles.pack(side="left", fill="x", expand=True)
-        self.project_title = tk.StringVar(value="打开一个工程，开始统计")
+        self.project_title = tk.StringVar(value="打开一个工程，开始设计")
         ttk.Label(titles, textvariable=self.project_title, style="Title.TLabel").pack(anchor="w")
         self.project_path = tk.StringVar(value="选择包含清册和 data 文件夹的工程目录")
         path_label = ttk.Label(titles, textvariable=self.project_path, style="Muted.TLabel", wraplength=620)
         path_label.pack(anchor="w", pady=(5, 0))
         titles.bind("<Configure>", lambda e: path_label.configure(wraplength=max(200, e.width - 10)))
-        self.run_button = self._button(header, "开始计算", self.start_calculation, primary=True, mutate=True)
+        self.run_button = self._button(header, "计算电缆", self.start_calculation, primary=True, mutate=True)
         self.run_button.pack(side="right", padx=(16, 0))
         self.state_text = tk.StringVar(value="尚未选择工程")
         ttk.Label(main, textvariable=self.state_text, foreground=ACCENT).pack(anchor="w", pady=(15, 13))
 
-        metrics = ttk.Frame(main)
-        metrics.pack(fill="x", pady=(0, 18))
+        self.notebook = ttk.Notebook(main, style="Workbench.TNotebook")
+        self.notebook.pack(fill="both", expand=True)
+        self.tabs: dict[str, ttk.Frame] = {}
+        for name in ("工程概览", "计算参数", "柜名匹配", "路径复核", "端子排出图", "数据导出", "问题清单", "输出文件", "运行日志"):
+            page = ttk.Frame(self.notebook, padding=12, style="Card.TFrame")
+            self.notebook.add(page, text=name)
+            self.tabs[name] = page
+        metrics = ttk.Frame(self.tabs["工程概览"], style="Card.TFrame")
+        metrics.pack(fill="x", pady=(0, 12))
         self.metrics: dict[str, tk.StringVar] = {}
         for i, (key, title) in enumerate((("total", "电缆总数"), ("ok", "已完成计算"), ("failed", "未计算"), ("length", "自动统计合计 / 米"))):
             metrics.columnconfigure(i, weight=1, uniform="metric")
@@ -243,26 +281,29 @@ class CableStatApp:
             ttk.Label(card, text=title, style="Card.TLabel", foreground=MUTED).pack(anchor="w")
             ttk.Label(card, textvariable=self.metrics[key], style="Metric.TLabel").pack(anchor="w", pady=(6, 0))
 
-        self.notebook = ttk.Notebook(main)
-        self.notebook.pack(fill="both", expand=True)
-        self.tabs: dict[str, ttk.Frame] = {}
-        for name in ("工程概览", "计算参数", "柜名匹配", "问题清单", "运行日志"):
-            page = ttk.Frame(self.notebook, padding=16, style="Card.TFrame")
-            self.notebook.add(page, text=name)
-            self.tabs[name] = page
         self._build_overview()
         self._build_params()
         self._build_aliases()
         self._build_issues()
         self._build_log()
+        self._build_route()
+        self._build_cad()
+        self._build_outputs()
+        self.terminal_page = TerminalPage(self.tabs["端子排出图"], on_issues=self._terminal_issues_changed,
+                                          on_changed=self._terminal_changed, on_busy=self._terminal_busy_changed)
+        self.terminal_page.pack(fill="both", expand=True)
+        self.notebook.bind("<<NotebookTabChanged>>", self._page_changed)
         bottom = ttk.Frame(main)
-        bottom.pack(fill="x", pady=(15, 0))
+        bottom.pack(side="bottom", fill="x", pady=(10, 0))
         self.phase = tk.StringVar(value="就绪")
         self.elapsed = tk.StringVar(value="Ctrl+Enter 开始计算  ·  F5 刷新")
         ttk.Label(bottom, textvariable=self.phase).pack(side="left")
         ttk.Label(bottom, textvariable=self.elapsed, style="Muted.TLabel").pack(side="right")
         self.progress = ttk.Progressbar(main, maximum=100, mode="determinate")
-        self.progress.pack(fill="x", pady=(8, 0))
+        self.progress.pack(side="bottom", fill="x", pady=(8, 0))
+        # 先给状态与进度栏分配空间，避免高 DPI 下 Notebook 的请求高度挤掉它们。
+        self.notebook.pack_forget()
+        self.notebook.pack(fill="both", expand=True)
         self._update_enabled()
 
     def _table(self, parent: Any, columns: list[tuple[str, str, int]], *, height: int = 8) -> ttk.Treeview:
@@ -372,12 +413,16 @@ class CableStatApp:
         selector = ttk.Combobox(bar, textvariable=self.issue_level, values=["全部级别", *LEVEL_COLORS], state="readonly", width=12)
         selector.pack(side="left")
         selector.bind("<<ComboboxSelected>>", lambda _e: self._render_issues())
+        self.issue_source = tk.StringVar(value="全部来源")
+        source_selector = ttk.Combobox(bar, textvariable=self.issue_source, values=["全部来源", "电缆", "端子"], state="readonly", width=9)
+        source_selector.pack(side="left", padx=(8, 0))
+        source_selector.bind("<<ComboboxSelected>>", lambda _e: self._render_issues())
         self.issue_search = tk.StringVar()
         ttk.Entry(bar, textvariable=self.issue_search, width=27).pack(side="left", padx=10)
         self.issue_search.trace_add("write", lambda *_: self._render_issues())
         self.issue_count = tk.StringVar(value="尚无检查结果")
         ttk.Label(bar, textvariable=self.issue_count, style="Card.TLabel", foreground=MUTED).pack(side="left")
-        self.issue_tree = self._table(page, [("level", "级别", 80), ("message", "问题说明", 650)], height=6)
+        self.issue_tree = self._table(page, [("source", "来源", 60), ("level", "级别", 70), ("message", "问题说明", 600)], height=6)
         self.issue_tree.bind("<<TreeviewSelect>>", self._issue_selected)
         self.issue_detail = tk.Text(page, height=4, wrap="word", bg="#f5f8fb", fg=INK, relief="flat", padx=12, pady=10)
         self.issue_detail.pack(fill="x", pady=(12, 0))
@@ -406,18 +451,18 @@ class CableStatApp:
 
     def _history_selected(self, _event: Any = None) -> None:
         selected = self.history_list.curselection()
-        if selected and not self.busy:
+        if selected and not self.task_busy:
             self.select_project(Path(self.history_paths[selected[0]]))
 
     def choose_project(self) -> None:
-        if self.busy:
+        if self.task_busy:
             return
         name = filedialog.askdirectory(parent=self.root, title="选择工程文件夹", initialdir=str(self.project or app.tool_dir() / "项目"))
         if name:
             self.select_project(Path(name))
 
     def new_project(self) -> None:
-        if self.busy or not self._resolve_edits():
+        if self.task_busy or not self._resolve_edits():
             return
         dialog = tk.Toplevel(self.root)
         dialog.title("新建工程")
@@ -473,11 +518,13 @@ class CableStatApp:
             self._error("导出失败", exc)
 
     def select_project(self, project: Path, *, auto_run: bool = False) -> None:
-        if self.busy or not self._resolve_edits():
+        if self.task_busy or not self._resolve_edits():
             return
         project = project.resolve()
         if not project.is_dir() or app.same_path(project, app.tool_dir()):
             self._error("无法打开工程", "请选择具体工程文件夹，不要选择工具根目录。")
+            return
+        if not self.terminal_page.set_project(project):
             return
         self.project = project
         self.snapshot = None
@@ -500,13 +547,15 @@ class CableStatApp:
         self.file_tree.delete(*self.file_tree.get_children())
         self._render_cabinets()
         self._render_issues()
+        self._refresh_module_status()
+        self._refresh_outputs()
         app.remember_project(self.cfg, project)
         app.save_config(self.cfg)
         self._update_history()
         self.refresh(auto_run=auto_run, resolve=False)
 
     def refresh(self, *, auto_run: bool = False, resolve: bool = True) -> None:
-        if self.busy or not self.project or (resolve and not self._resolve_edits()):
+        if self.task_busy or not self.project or (resolve and not self._resolve_edits()):
             return
         project = self.project
         self._launch("读取工程输入", lambda: inspect_project(project), "scanned", auto_run)
@@ -524,6 +573,7 @@ class CableStatApp:
                 self.events.put((event, (work(), extra)))
             except Exception as exc:
                 self.events.put(("error", (title, str(exc) or type(exc).__name__, traceback.format_exc())))
+        gc.collect()
         threading.Thread(target=worker, name="cable-stat-worker", daemon=False).start()
 
     def _pump(self) -> None:
@@ -567,8 +617,8 @@ class CableStatApp:
             self.elapsed.set(f"已用时 {time.monotonic() - self.started:.1f} 秒")
             current = float(self.progress["value"])
             self.progress["value"] = min(self.target_progress, current + max(0.5, (self.target_progress - current) * 0.22))
-        elif self.close_when_done:
-            self._destroy()
+        elif self.close_when_done and not self.task_busy:
+            self.on_close()
             return
 
     def _finish_busy(self, *, success: bool = True) -> None:
@@ -581,11 +631,13 @@ class CableStatApp:
     def _update_enabled(self) -> None:
         for widget, normal in self.mutation_controls:
             # 打开、新建和导出按钮在无工程时仍可用。
-            available = not self.busy and (self.project is not None or widget.master == self.history_list.master)
+            available = not self.task_busy and (self.project is not None or widget.master == self.history_list.master)
             if any(str(widget).startswith(str(self.tabs[tab]) + ".") for tab in ("计算参数", "柜名匹配")):
                 available = available and self.snapshot is not None
             widget.configure(state=normal if available else "disabled")
-        self.history_list.configure(state="disabled" if self.busy else "normal")
+        self.history_list.configure(state="disabled" if self.task_busy else "normal")
+        if hasattr(self, "terminal_page") and hasattr(self.terminal_page, "set_external_busy"):
+            self.terminal_page.set_external_busy(self.busy)
 
     def _apply_snapshot(self, snapshot: ProjectSnapshot) -> None:
         self.snapshot = snapshot
@@ -614,9 +666,11 @@ class CableStatApp:
         self._render_issues()
         self._append_log(f"\n已打开工程：{status.project_dir}\n预检发现 {len(self.issues)} 条提示或问题。\n")
         self._update_enabled()
+        self._refresh_module_status()
+        self._refresh_outputs()
 
     def start_calculation(self) -> None:
-        if self.busy or not self.project or not self._resolve_edits():
+        if self.task_busy or not self.project or not self._resolve_edits():
             return
         self.result = None
         for var in self.metrics.values():
@@ -643,6 +697,8 @@ class CableStatApp:
         self._render_cabinets()
         self._render_issues()
         self._append_log("统计结束，可打开结果工作簿或路径可视化。\n", "warn" if result.failed else "success")
+        self._refresh_module_status()
+        self._refresh_outputs()
         if result.failed or any(level == "错误" for level, _ in self.issues):
             self.notebook.select(self.tabs["问题清单"])
         else:
@@ -774,25 +830,29 @@ class CableStatApp:
         self.issue_tree.delete(*self.issue_tree.get_children())
         query = self.issue_search.get().strip().casefold()
         shown = 0
-        for i, (level, message) in enumerate(self.issues):
+        self.display_issues = [UnifiedIssue("电缆", level, message) for level, message in self.issues] + self.terminal_issues
+        for i, issue in enumerate(self.display_issues):
+            level, message = issue.level, issue.message
             if self.issue_level.get() not in ("全部级别", level) or query not in message.casefold():
                 continue
-            self.issue_tree.insert("", "end", iid=str(i), values=(level, message.replace("\n", " ")), tags=(level,))
+            if self.issue_source.get() not in ("全部来源", issue.source):
+                continue
+            self.issue_tree.insert("", "end", iid=str(i), values=(issue.source, level, message.replace("\n", " ")), tags=(level,))
             shown += 1
-        errors = sum(level == "错误" for level, _ in self.issues)
-        self.issue_count.set(f"显示 {shown} / {len(self.issues)} 条 · {errors} 条错误")
+        errors = sum(issue.level == "错误" for issue in self.display_issues)
+        self.issue_count.set(f"显示 {shown} / {len(self.display_issues)} 条 · {errors} 条错误")
         self.issue_detail.configure(state="normal")
         self.issue_detail.delete("1.0", "end")
-        self.issue_detail.insert("end", "选中问题以查看完整说明。" if self.issues else "当前没有检查问题。")
+        self.issue_detail.insert("end", "选中问题以查看完整说明。" if self.display_issues else "当前没有检查问题。")
         self.issue_detail.configure(state="disabled")
 
     def _issue_selected(self, _event: Any = None) -> None:
         selected = self.issue_tree.selection()
         if selected:
-            level, message = self.issues[int(selected[0])]
+            issue = self.display_issues[int(selected[0])]
             self.issue_detail.configure(state="normal")
             self.issue_detail.delete("1.0", "end")
-            self.issue_detail.insert("end", f"[{level}] {message}")
+            self.issue_detail.insert("end", f"[{issue.source} · {issue.level}] {issue.message}")
             self.issue_detail.configure(state="disabled")
 
     def _append_log(self, text: str, tag: str | None = None) -> None:
@@ -827,6 +887,12 @@ class CableStatApp:
         selected = self.file_tree.selection()
         if selected:
             name = selected[0]
+            if name.startswith("terminal_"):
+                self.show_page("输出文件" if name == "terminal_dxf" else "端子排出图")
+                return
+            if name == "cable_result":
+                self.open_artifact("xlsx")
+                return
             path = self.snapshot.status.workbook if name == "workbook" else self.project / "data" / self.snapshot.status.files[int(name[4:])].name
             if path:
                 self._open_path(path)
@@ -856,11 +922,12 @@ class CableStatApp:
             request = app.claim_handoff_request()
             if request:
                 self.pending_handoffs.append(request)
-            if not self.busy and self.pending_handoffs:
+            if not self.task_busy and self.pending_handoffs:
                 request = self.pending_handoffs.pop(0)
                 self.root.deiconify()
                 self.root.lift()
-                self.select_project(Path(request["project"]), auto_run=bool(request.get("run", True)))
+                if request["project"]:
+                    self.select_project(Path(request["project"]), auto_run=bool(request.get("run", True)))
         self._later(800, self._poll_handoff)
 
     def _poll_inputs(self) -> None:
@@ -876,15 +943,24 @@ class CableStatApp:
         messagebox.showerror(title, str(error), parent=self.root)
 
     def on_close(self) -> None:
-        if self.busy:
+        if self.task_busy:
             if messagebox.askyesno("任务仍在运行", "任务正在处理工程文件。是否在任务完成后自动关闭窗口？", parent=self.root):
                 self.close_when_done = True
                 self.state_text.set("正在完成当前任务 · 完成后自动关闭")
             return
         if self._resolve_edits():
-            self._destroy()
+            if self.terminal_page.save_state():
+                self._destroy()
+            else:
+                self.close_when_done = False
+        else:
+            self.close_when_done = False
 
     def _destroy(self) -> None:
+        self.terminal_page.dispose()
+        self.cfg["window_geometry"] = self.root.geometry()
+        self.cfg["window_maximized"] = self.root.state() == "zoomed"
+        app.save_config(self.cfg)
         self.closed = True
         for timer in self._timer_ids:
             self.root.after_cancel(timer)
@@ -895,7 +971,15 @@ class CableStatApp:
 def run_gui(project: Path | None = None, *, auto_run: bool = False) -> int:
     enable_high_dpi()
     root = tk.Tk()
-    CableStatApp(root, project, auto_run=auto_run)
+    acceptance = os.environ.get("WORKBENCH_GUI_ACCEPTANCE") == "1920x1080@125"
+    if acceptance:
+        # 仅供成品验收：在当前屏幕模拟目标缩放，不改变用户的 Windows 显示设置。
+        root.tk.call("tk", "scaling", 120 / 72)
+    workbench = CableStatApp(root, project, auto_run=auto_run)
+    if acceptance:
+        root.state("normal")
+        root.geometry("1525x980+30+30")
+    root.report_callback_exception = workbench._callback_error
     root.mainloop()
     return 0
 

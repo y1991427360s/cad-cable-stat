@@ -1,4 +1,4 @@
-"""电缆长度自动统计 - 图形界面版入口（打包成单文件 exe 的入口）。
+"""电气二次设计工作台的工程管理、单实例与无界面自检。
 
 - 双击 exe：打开界面（窗口代码在 cable_stat_gui.py），选择/新建项目文件夹后点「开始计算」。
 - 从项目文件夹的 一键启动.cmd 或 CAD 向导进来（第一个参数或当前目录是项目文件夹）：自动选中并直接开算；
@@ -26,17 +26,17 @@ from cable_stat import __version__
 from cable_stat.pipeline import RunResult, print_report, run
 from cable_stat.project import RESULT_WORKBOOK, find_workbook
 
-APP_TITLE = "电缆长度自动统计"
+APP_TITLE = "电气二次设计工作台"
 APP_ICON_FILE = "app_icon.ico"
 LSP_FILES = ["cad_cable_wizard.lsp"]
 LEGACY_EXPORTED_LSP_FILES = ["cad_export_cable_route.lsp"]
 LAUNCHER_NAME = "一键启动.cmd"
 SMOKE_LOG_NAME = "电缆统计_自检.log"
-CONFIG_DIR_NAME = "电缆统计"
+CONFIG_DIR_NAME = "电气二次设计工作台"
 MAX_RECENT = 8
 
 # 单实例：已有窗口时，新启动的进程把项目写进交接文件后退出，由已运行的窗口认领并开算
-INSTANCE_MUTEX = "Local\\DianlanCableStatGUI"
+INSTANCE_MUTEX = "Local\\ElectricalSecondaryWorkbench"
 HANDOFF_FILE = "handoff_request.json"
 HANDOFF_MAX_AGE = 60.0
 HANDOFF_WAIT = 4.0
@@ -96,7 +96,10 @@ def config_file() -> Path:
 
 def load_config() -> dict[str, Any]:
     try:
-        data = json.loads(config_file().read_text(encoding="utf-8"))
+        path = config_file()
+        if not path.exists():
+            path = Path(os.environ.get("APPDATA") or Path.home()) / "电缆统计" / "config.json"
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
@@ -192,7 +195,7 @@ def write_launcher(project_dir: Path) -> None:
         content = f'@echo off\r\ncd /d "%~dp0"\r\nstart "" "{exe}"\r\n'
     else:
         tool = Path(__file__).resolve().parent
-        content = f'@echo off\r\ncd /d "%~dp0"\r\npython "{tool}\\run_auto_stat.py"\r\necho.\r\npause\r\n'
+        content = f'@echo off\r\ncd /d "%~dp0"\r\npythonw "{tool}\\app.py"\r\n'
     (project_dir / LAUNCHER_NAME).write_bytes(content.encode("gbk"))
 
 
@@ -212,6 +215,9 @@ def create_project(parent_dir: Path, name: str) -> Path:
     else:
         (project_dir / "data").mkdir(parents=True)
     write_launcher(project_dir)
+    from modules.terminal.service import TerminalService
+    TerminalService(project_dir).save_state({})
+    (project_dir / "outputs").mkdir(exist_ok=True)
     return project_dir
 
 
@@ -257,7 +263,7 @@ def startup_target(argv: list[str] | None = None, cwd: Path | None = None) -> tu
             if path.is_file():
                 path = path.parent
             if looks_like_project(path):
-                return path, True
+                return path, has_cable_workbook(path)
             if path.is_dir() and not same_path(path, tool_dir()):
                 return path, False
         except OSError:
@@ -267,8 +273,17 @@ def startup_target(argv: list[str] | None = None, cwd: Path | None = None) -> tu
     except OSError:
         return None, False
     if looks_like_project(here):
-        return here, True
+        return here, has_cable_workbook(here)
     return None, False
+
+
+def has_cable_workbook(project: Path) -> bool:
+    """只有端子输入的工程可直接打开，不启动必然失败的电缆计算。"""
+    try:
+        find_workbook(project)
+        return True
+    except (OSError, ValueError, RuntimeError):
+        return False
 
 
 # ---------------- 计算 ----------------
@@ -328,6 +343,12 @@ def smoke_test(argv: list[str] | None = None) -> int:
     lines = [f"{APP_TITLE} 自检  版本 {__version__}  {datetime.now():%Y-%m-%d %H:%M:%S}\n"]
     if project_dir.is_dir():
         ok = run_calculation(project_dir, lines.append)
+        try:
+            from tools.workbench_smoke import run_terminal_smoke
+            run_terminal_smoke(project_dir, lines.append)
+        except Exception:
+            ok = False
+            lines.append("端子自检失败：\n" + traceback.format_exc())
     else:
         ok = False
         lines.append(f"项目文件夹不存在：{project_dir}\n")
@@ -370,10 +391,10 @@ def handoff_file() -> Path:
     return config_dir() / HANDOFF_FILE
 
 
-def write_handoff_request(project: Path, run_now: bool = True) -> Path:
+def write_handoff_request(project: Path | None, run_now: bool = True) -> Path:
     path = handoff_file()
     tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    payload = {"project": str(project), "run": run_now, "time": time.time(), "pid": os.getpid()}
+    payload = {"project": str(project) if project else "", "run": run_now, "time": time.time(), "pid": os.getpid()}
     tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     os.replace(tmp, path)
     return path
@@ -396,7 +417,7 @@ def claim_handoff_request(max_age: float = HANDOFF_MAX_AGE) -> dict[str, Any] | 
             claimed.unlink()
         except OSError:
             pass
-    if not isinstance(data, dict) or not isinstance(data.get("project"), str) or not data["project"]:
+    if not isinstance(data, dict) or not isinstance(data.get("project"), str):
         return None
     try:
         age = abs(time.time() - float(data.get("time") or 0))
@@ -440,11 +461,13 @@ def hand_off_to_running_instance(project: Path, wait: float = HANDOFF_WAIT) -> b
 
 
 def main() -> int:
-    if os.environ.get("CABLE_STAT_SMOKETEST"):
+    if os.environ.get("CABLE_STAT_SMOKETEST") or os.environ.get("WORKBENCH_SMOKETEST"):
         return smoke_test()
     project, auto_run = startup_target()
     already_running = claim_single_instance()
-    if already_running and project is not None and auto_run and hand_off_to_running_instance(project):
+    if already_running:
+        allow_foreground_switch()
+        write_handoff_request(project, auto_run)
         return 0
     from cable_stat_gui import run_gui
 

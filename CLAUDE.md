@@ -1,65 +1,66 @@
-# CLAUDE.md
+# 电气二次设计工作台 — 项目约定
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+`AGENTS.md` 与 `CLAUDE.md` 保存同一套项目规则，修改后保持逐字一致。使用与架构说明见 `README.md`，CAD 详细步骤见 `使用说明.md`，入门见 `快速上手（最简版）.md`。
 
-本仓库另有 `AGENTS.md`（编码风格、提交规范、数据注意事项），与本文件保持一致；修改约定时两边同步。面向使用者的文档是 `快速上手（最简版）.md`（步骤版）和 `使用说明.md`（详细版），改动图层约定、参数或运行方式时同步更新这两份。
+## 产品与模块边界
 
-## 项目概述
+本仓库以 `cad-cable-stat` 为母项目，把 `duanziHTML` 的端子解析和绘图接入同一个 Windows tkinter/ttk 工作台。正式入口是 `app.py`，正式交付物是 `电气二次设计工作台.exe`。不得启动旧端子 GUI、第二个 `tk.Tk` 或第二个 EXE 来拼接功能；不引入 HTTP 服务、数据库或云存储。
 
-电缆长度自动统计工具：根据 CAD 导出的柜子坐标、固定走线路径（电缆沟/桥架中心线）和电缆竖井数据，自动计算 `自动统计.xlsx` 中每条电缆的路径长度，并生成统计结果与路径可视化页面。
+- `cable_stat_app.py`：工程创建、资源导出、全局配置、单实例交接及自检；`cable_stat_gui.py`：唯一主窗口和电缆页面；`ui/workbench_pages.py`：统一导航、问题和成果页面。
+- `cable_stat/`：原电缆引擎，计算在 `calc.py`、图构建在 `graph.py`、流程在 `pipeline.py`、HTML 模板为 `visualizer.html`。`calculate_cable_lengths.py`、`run_auto_stat.py` 是兼容入口，不是完整算法所在文件。
+- `modules/terminal/duanzi_dxf_tool.py`：原解析、布局及 DXF 核心；`service.py`：工程状态和输出目录适配；`page.py`：嵌入式端子页面。界面不得承接绘图算法。
+- `core/models.py`：统一问题和后续业务实体接口；V1 保留 Excel/CSV/TXT/JSON/DXF 的文件存储方式。
 
-**工具/项目分离**：本目录只放通用工具代码；每个工程项目一个独立文件夹（含 `自动统计.xlsx`、`data\`、`outputs\`、`一键启动.cmd`），可建在 `项目\<项目名>\` 或任何位置（用户实际把项目放在工程目录树里，如 `E:\366256\2025年\...\110 青啤五厂\03 输出\电缆统计\`）。`项目模板\` 是新项目骨架；建新项目用 `电缆统计.exe` 的「新建项目」按钮或 `新建项目.cmd`。项目里的 `一键启动.cmd` 按绝对路径 start 本目录的 `电缆统计.exe`。不要往本目录根放任何项目数据。计算规则：路径不拐弯按 CAD 固定路径最短长度 +7m，路径拐弯/跨楼层按 `(CAD固定路径最短长度 + 7m) × 1.2`，跨层经竖井计入竖井高度；路径进入过房间但不始终在同一房间内时，最后再加 `跨房间修正`（默认 3m，在 ×1.2 之后加）。
+## 工程、数据与编码
 
-## 常用命令
+工具与工程分离：根目录只放通用源码和发布程序；每个工程一个文件夹，可位于 `项目/<工程名>/` 或其他位置。`项目模板/` 是骨架。旧电缆工程可直接打开，缺少端子数据时显示空输入。
+
+- 电缆输入：源清册、`data/参数.csv`、`柜子坐标.csv`、`路径线段.csv`、`竖井.csv`、可选 `房间范围.csv`；`柜名别名.csv`、`强制规则.csv` 是人工校正，CAD 再导出不得覆盖。
+- 端子输入：`data/terminal/端子排.txt`、`接线.txt`、`settings.json`，包括柜名和方向。业务输入必须随工程保存，不可写到旧端子全局 `state.json`。成功生成、切换工程前、关闭前保存；保存失败不得继续切换或关闭。三个输入须成组保存；任一替换失败还原已替换文件，回滚失败保留 `.save-backup-*.bak` 原件并报告路径。
+- 全局 `%APPDATA%/电气二次设计工作台/config.json` 只保存最近工程、窗口等应用设置；兼容读取旧电缆配置。测试用 mock 隔离配置，不改真实用户状态。
+- 不覆盖原始 `自动统计.xlsx`；电缆成果写入 `outputs/`，端子完整图及仅接线图写入 `outputs/端子排/`。目标被 CAD/Excel 占用时沿用时间戳退避文件名。
+- 中文 CSV 统一 `utf-8-sig`；端子业务 TXT/JSON 用 UTF-8。修改数据前分清 CAD 导出、人工校正和测试样例。`.dwg`、`.dwl` 是原图资料，勿随意改；Office 锁文件和 CAD 备份不提交。
+- 生成的 `一键启动.cmd` 与 `新建项目.cmd` 使用 GBK + CRLF。工程启动器先 `cd /d "%~dp0"` 再启动程序，不把带尾反斜杠的 `"%~dp0"` 作为参数传入。程序迁移位置后需刷新工程启动器；模板改动不会自动同步已建工程。
+
+## GUI 与线程
+
+- 只允许主线程读取或修改 Tk 对象，包括变量和 `after()`；工作线程只向 `queue.Queue` 投递结果，由主线程定时取回。启动工作线程前在主线程 `gc.collect()`，避免 Tk 变量在后台被析构。
+- 电缆计算和端子生成共用忙碌锁；运行期间禁止重复生成、并行运行另一模块或切换工程。后台异常必须结束忙碌状态并回显；无控制台 EXE 的 `report_callback_exception` 要显示错误。
+- `F5`、`Ctrl+Enter` 按当前页面路由。端子两个 Text 自身也要绑定 `Ctrl+Enter` 并返回 `"break"`，避免 `<Return>` 类绑定先插入换行。
+- 方向按端子排名称及同名出现次序（`#2`）记忆，不按易变的位置键；默认方向改动应用到全部块。DPI 感知在创建 Tk 前启用，布局保留缩放和滚动能力。
+
+## 电缆与 CAD 合同
+
+- 表头、参数名保持中文业务名。活动清册必需 `电缆编号`、`起点`、`终点`、`电缆长度`，表头空白自动忽略；缺少 `自动统计`、`向上取整` 时在结果工作簿补列。
+- 柜名忽略空白后匹配，其他差异通过别名表人工确认。默认毫米图参数：`CAD每米单位=1000`、`吸附容差=0.05`、`最大接入距离=20000`；新参数放参数表并同步内置默认值与模板。
+- 保留端点吸附、T 型接入、同层内部十字/斜交切分、同名竖井跨层、最短路径、别名和强制规则。默认直线基础长度 +7m；拐弯/跨层为（基础长度 +7m）×1.2，竖井高度已计入基础长度；跨房间修正在倍率后加。不得为整合修改已验证的计算行为。
+- 用户只导出和加载完整 `cad_cable_wizard.lsp`；`cad_export_cable_route.lsp` 保留为开发兼容源码，不内嵌。两份导出逻辑必须同步，`test_room_export_contract.py` 检查共享函数逐字一致。
+- 两份 LISP 严格按 GBK + CRLF 字节级读写，检查替换字符和括号平衡；修改后同时更新 `*ddfd-cable-version*`。命令使用 `DDFD_` 前缀，图层使用 `CABLE_*`。
+- 房间导出遍历实体读取 DXF 顶点与闭合位，不依赖 ZWCAD 曲线 COM 返回格式；仅认带 `DDFD_CABLE_ROOM` XData 名称的多段线。定义房间不得改 CLAYER。CSV 临时生成后成组替换，读取失败不得覆盖原数据。
+
+## 端子解析与出图合同
+
+- 沿用原核心解析与出图行为。坐标输入名称只认行末 `端子名`；未标注文字按端子号保留，无法归属必须报错。普通/坐标格式不能混用，两个混用方向都要检查。
+- 坐标格式重复端子号每格保留，接线连首次出现的位置并提示；普通格式重复报错。保留 `QD-COM`、`X/X2`、D 结尾名称、普通同名段合并及连续接线；不得把 `JD-901` 等原理号误拆为端子。
+- `ZD2`、`ZD:2`、`ZD：2` 等价；`QD:COM1` 引用 `QD-COM` 的 1 号。显式冒号严格拆分，`X2:1` 不得回退为 `X:21`；无冒号歧义沿用最长名称并提示。
+- DXF R2010，1 单位 = 1mm；端子格节距 5mm、总高 75mm；默认向下，各行电缆距离 10、15、20…mm；多电缆引线居中以 1mm 展开，左侧对应较近电缆；向上保留 SJ、向下保留 XJ 短线。
+- 文字 HZ（`txt.shx` + `hztxt.shx`）、常规字高 3、宽度因子 0.7；原理号 ACI 4、水平电缆线 ACI 3，其余 ACI 7。BIAN 三角尖点在电缆右端左侧 40mm，编号在左 20mm，去向从右 1.5mm 起，规格在右 32mm。
+- 完整图背景框线/名称/编号/图签锁层，接线层可编辑；仅接线图只含接线对象，与完整图坐标一致。保持可编辑 LINE/TEXT 实体，不栅格化、不依赖 CAD 进程出图。
+
+## 运行、验证与发布
 
 ```powershell
-# 安装唯一依赖
-python -m pip install openpyxl
-
-# 一键运行完整流程（在项目文件夹里查找 自动统计.xlsx，输出到项目的 outputs/）
-# 等价于双击项目文件夹里的 一键启动.cmd
-.\运行自动统计.ps1 -Project "<项目文件夹>"     # 等价于 python .\run_auto_stat.py <项目文件夹>
-
-# 直接调试核心脚本（定位参数、路径、柜名问题时用）
-python .\calculate_cable_lengths.py --workbook "<项目文件夹>\自动统计.xlsx" --data-dir "<项目文件夹>\data" --output "<项目文件夹>\outputs\自动统计_计算结果.xlsx"
-
-# 运行轻量测试（pytest 风格，也可直接 python 执行）
-python .\test_calculate_cable_lengths.py
-
-# 提交前最低限度的语法检查
-python -m py_compile .\calculate_cable_lengths.py .\run_auto_stat.py
+python -m pip install -r .\requirements.txt
+python .\app.py
+python -m test_calculate_cable_lengths
+python -m unittest discover -v
+.\运行自动统计.ps1 -Project "<工程文件夹>"
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build_exe.ps1
 ```
 
-注意：本机 Python 输出中文依赖 `PYTHONUTF8=1`（已设为 Windows 用户环境变量）。
-
-## 架构
-
-数据流：**CAD → CSV → Python 计算 → Excel + HTML 可视化**
-
-1. `cad_export_cable_route.lsp` — 在 CAD 中执行 `DDFD_EXPORT_CABLE_ROUTE`，从约定图层导出 `柜子坐标.csv`、`路径线段.csv`、`竖井.csv`、`房间范围.csv`。`cad_cable_wizard.lsp` 是自包含向导（含 `DDFD_CABLE_ROOMS` 房间定义和完整导出逻辑），用户侧只需加载它。房间边界复制到 `CABLE_ROOM_*F` 并以 XData 保存名称；导出时遍历模型空间，**只认带 `DDFD_CABLE_ROOM` XData 名称的多段线**（房间图层上未命名的图框/表格只提示不导出，`DDFD_ROOM_CHECK` 定位、`DDFD_CLEAN_ROOM_LAYERS` 确认后移到 0 层），直接读取 DXF 顶点和闭合位，避免 ZWCAD 曲线 COM/选集差异；定义房间不得改 CLAYER。精简版 = 精简版文件头 + 向导里“通用与导出部分”整段 + 加载提示，`test_room_export_contract.py` 校验两份共享函数逐字一致；改 LISP 同时改文件顶部的 `*ddfd-cable-version*`。两份 LISP 的导出逻辑必须同步，且当前两份均为 **GBK + CRLF**，必须字节级读写并检查替换字符与括号平衡。`data/` 里另有两张人工维护表：`柜名别名.csv` 和 `强制规则.csv`。
-2. `run_auto_stat.py` — 薄封装：第一个命令行参数是项目文件夹（缺省用当前目录；等于工具目录时报错引导；参数会清洗尾引号/尾反斜杠），在项目文件夹内按活动工作表表头（电缆编号/起点/终点/电缆长度，与 `load_workbook_rows` 的必需表头一致，经 `normalize_header` 剔除全部空白后匹配）查找工作簿，直接 import 调用 `calculate_cable_lengths.main(argv)`（不再 subprocess，便于打包），data 和 outputs 都取项目文件夹下的。「自动统计」「向上取整」列可缺省，`load_workbook_rows` 会自动补建（「向上取整」固定在「自动统计」右边一列，存 `math.ceil(自动统计)`，右边已有列时插列并顺移）；「电缆编号」列必需。
-3. `cable_stat_app.py` — tkinter 图形界面主程序，也是 `电缆统计.exe` 的打包入口：选/建项目、开始计算、打开结果/可视化、只导出完整向导 `cad_cable_wizard.lsp`；精简版 `cad_export_cable_route.lsp` 不再内嵌或导出给用户。窗口和 EXE 使用 `app_icon.ico`，项目模板作为资源内嵌。`CABLE_STAT_SMOKETEST=1` 走无界面自检。改 lsp/模板/任何 py 后都要按 README 的绝对路径命令重新打包并删除 `_build`；使用 `--specpath _build` 时资源路径不能写相对路径。
-4. `calculate_cable_lengths.py` — 全部核心逻辑（单文件，约 1600 行）：
-   - **数据加载**：`load_params`/`load_cabinets`/`load_segments`/`load_shafts`/`load_aliases`/`load_rule_overrides`/`load_workbook_rows`，dataclass：`Segment`/`Cabinet`/`Shaft`/`AttachPoint`。柜名经 `normalize_cabinet_name` 去掉全部空白字符后匹配；别名经 `apply_aliases` 直接注册进 cabinets 字典。
-   - **`RouteGraph`** 类是核心：把路径线段端点按 `吸附容差` 吸附合并成节点（按楼层分组）；`connect_t_junctions` 把落在其他线段中间的端点接入（T型连接）；`connect_cross_junctions` 检测同层线段内部十字交叉/斜交并在交点处切分打通共享节点；`add_attachment` 把柜子/竖井垂直投影到最近线段（`make_attachment` + `project_to_segment`，超过 `最大接入距离` 报错）；`finalize_route_edges` 按沿线距离排序切分线段为边；同名竖井（`ZJ1_1F`/`ZJ1_2F` → base_id `ZJ1`）跨楼层加竖直边；`shortest_path` 是 Dijkstra（`calculate_rows` 内按起终点节点对缓存，反向复用）。
-   - **规则判定**：`is_route_bent` 通过路径边方向向量变化或是否经过竖井判断"拐弯"；`calculate_rows` 对不拐弯路径应用 +7，涉及拐弯/跨楼层应用先 +7 再 ×1.2；强制规则表优先级最高（正反向均命中）。
-   - **校验告警**：`build_graph` 输出问题清单——柜名缺失、竖井编号后缀与楼层不一致、竖井未跨楼层配对、柜子缺楼层、路径网断块明细（分成几块、每块挂载哪些柜子/竖井）等；另有「参数提示」体检（吸附容差≥最短线段一半、柜子超出最大接入距离时给出建议值、路径总长换算后明显不合理时提示核对 CAD每米单位），`main()` 会把参数提示同时打印到运行日志；`make_cabinet_check_rows` 对缺坐标柜子用 difflib 给出 `近似CAD柜名建议`；`check_suspicious_rooms` 提示没有柜子/路径或未命名的房间。
-   - **输出**：`write_results_to_workbook` 写结果工作簿（Sheet1 填值 + 统计明细/柜子清单/参数/问题清单 sheet）；`VISUALIZER_HTML_TEMPLATE`（内嵌的大段 HTML/JS 模板）+ `build_visualization_data` 生成 `路径可视化.html` 和 `路径可视化数据.json`；电缆的 `path_edges` 只存节点编号（页面加载时换回顶层 `nodes` 里的节点对象），`path_nodes` 是节点编号列表。结果工作簿被 Excel 占用时另存为 `自动统计_计算结果_时分秒.xlsx`；`柜子清单.csv` 只写 outputs，不再复制进 data。
-   - 所有长度先以 CAD 单位计算，经 `CAD每米单位` 换算成米。
-
-## 关键约定
-
-- 表头/列名/参数名全部用中文业务名（`起点`、`终点`、`柜子名称`、`竖井高度` 等），不要英文化。
-- 柜子名称是 CAD 文字与 Excel 起终点匹配的唯一键；柜名里的普通空格、换行、制表符和全角空格会自动剔除，单纯空格差异不需要别名；其他对不上时优先在 `data/柜名别名.csv` 加映射（参考柜子清单的 `近似CAD柜名建议` 列），不要轻易改图。
-- 路径连通性支持端点吸附、T 型连接（端点搭在另一条线段中间）以及十字/斜向交叉连接（两条线段在内部相交时自动切分打通），纯空间无交点不连通。
-- 新增可调参数放 `data/参数.csv`（`load_params` 读取），脚本里给合理默认值。
-- 默认按毫米图配置：`CAD每米单位=1000`、`吸附容差=0.05`、`最大接入距离=20000`；项目模板与内置默认值必须同步。
-- AutoLISP 命令保持 `DDFD_` 前缀，图层名沿用 `CABLE_*` 规则。
-- 不要覆盖原始 `自动统计.xlsx`，结果一律写项目文件夹的 `outputs/`。
-- 改 `项目模板\` 里的文件时注意：已建项目不会自动同步，必要时手动更新各项目（含各项目的 `一键启动.cmd`）；模板改动后**必须重新打包 exe**（模板是内嵌资源）。`一键启动.cmd` 和 `新建项目.cmd` 都是 GBK 编码（含中文路径/提示，双击时控制台按 936 解析），内容是 `cd /d "%~dp0"` 后 `start` 绝对路径的 `电缆统计.exe`（GUI 检测到当前目录是项目文件夹就自动开算）。cmd 里传 `"%~dp0"` 会因尾反斜杠转义引号而产生坏路径——启动脚本靠 cd 后不传参数来规避。
-- 所有中文 CSV（`data/` 和 `outputs/`）必须是**带 BOM 的 UTF-8（utf-8-sig）**，否则 Excel 双击打开乱码。脚本的 `write_csv_dicts` 已用 utf-8-sig；手工新建 CSV 时不要用裸 UTF-8 写入，用 `encoding='utf-8-sig'`。
-- `.dwg`/`.dwl` 是工程图基准文件，勿随意修改；`~$*.xlsx` 锁文件勿提交。
-
-## 验证
-
-先跑 `python test_calculate_cable_lengths.py`（覆盖图构建、T型连接、十字交叉、拐弯判定、别名表、强制规则）。改动计算逻辑后再跑一遍完整流程，检查 `outputs/统计明细.csv` 的 `状态`、`规则`、`基础路径长度`、`差值`，查看结果工作簿的 `问题清单`，并打开 `路径可视化.html` 确认高亮路径、楼层切换、详情栏、三维旋转/平移/缩放正常。新增独立算法在该测试文件补用例。
+- Python 使用 4 空格缩进、`pathlib.Path`、类型标注和 dataclass。当前构建环境为 Python 3.14，固定依赖见 `requirements.txt`；构建脚本不自动安装或升级依赖。
+- 电缆基线必须独立运行，不能只用 unittest discovery 代替。计算改动还应跑典型清册并查明细、问题清单和路径可视化；端子改动要跑原核心、工程存储、嵌入页面及联合回归，并用 ezdxf 回读成果。
+- 修改任意 py/lsp/模板后必须重打包并用 `CABLE_STAT_SMOKETEST=1` 自检。`build_exe.ps1` 先语法/导入/测试，打包到 `_build_release/dist/`，用独立合成工程验收电缆、DXF、内嵌资源与源清册哈希；全部通过才备份并替换正式 EXE。失败保留原版。
+- 冒烟也可能对已有工程运行：端子验收必须在 finally 恢复三个业务输入的原字节（原来不存在的文件删除），使用唯一验收柜名，不覆盖已有 DXF。`test_workbench_smoke.py` 覆盖此约束。兼容日志名为 `电缆统计_自检.log`，端子报告为 `outputs/端子排/smoke_validation.json`。
+- PyInstaller 资源参数用绝对路径；正式包为单文件无控制台并内嵌图标、完整 LISP、项目模板、HTML 及依赖资源。不能以 EXE 字符串搜索代替实际自检。
+- 提交使用简短祈使句；说明影响的输入、验证与工程参数依据。工程数据、EXE、构建目录、临时锁文件不入库。产品名称、按钮、数据目录或运行方式变更时同步使用文档。
